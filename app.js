@@ -35,6 +35,8 @@ const h = (tag, attrs = {}, ...kids) => {
   return el;
 };
 const clone = (o) => JSON.parse(JSON.stringify(o));
+// optional UI parts are passed as null/false; never render them as text
+{ const ap = Element.prototype.append; Element.prototype.append = function (...a) { return ap.apply(this, a.filter((x) => x != null && x !== false)); }; }
 
 // ---------------- state ----------------
 const engine = new Engine();
@@ -382,7 +384,14 @@ async function showHome() {
       h('button', { class: 'icon-btn small', 'aria-label': 'メニュー', onclick: (e) => { e.stopPropagation(); projectMenu(p); } }, '⋯')));
   }
   const est = await Store.estimate();
-  $('storageInfo').textContent = est && est.usage != null ? `使用中: ${(est.usage / 1048576).toFixed(0)} MB` + (est.quota ? ` / 目安 ${(est.quota / 1073741824).toFixed(1)} GB` : '') : '';
+  let persisted = false;
+  try { persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : false; } catch (e) { /* ignore */ }
+  if (!persisted) persisted = await Store.requestPersist();
+  const standalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+  $('storageInfo').innerHTML = '';
+  $('storageInfo').append(
+    h('div', {}, (est && est.usage != null ? `使用中: ${(est.usage / 1048576).toFixed(0)} MB` : '') + ' · データ保護：' + (persisted || standalone ? '有効' : '未設定（ホーム画面に追加してください）')),
+    projects.length ? h('button', { class: 'big-btn ghost', style: 'margin-top:10px;min-height:42px', onclick: () => exportAllBackup(projects) }, `すべてのプロジェクトをバックアップ（${projects.length}件）`) : null);
 }
 function projectMenu(p) {
   openModal((c, close) => {
@@ -395,7 +404,7 @@ function projectMenu(p) {
   });
 }
 async function deleteProjectData(p) {
-  for (const id of new Set(p.tracks.map((t) => t.audioId).filter(Boolean))) {
+  for (const id of new Set(p.tracks.flatMap((t) => [t.audioId, t.undo && t.undo.audioId]).filter(Boolean))) {
     await Store.deleteAudio(id).catch(() => {}); await Store.deleteAnalysis(id).catch(() => {});
     for (let k = -12; k <= 12; k++) if (k) Store.deleteAudio(id + '@k' + k).catch(() => {});
   }
@@ -417,7 +426,7 @@ async function duplicateProject(p, name) {
       if (an) await Store.putAnalysis(Object.assign({}, an, { id: nid }));
     }
     const tmap = new Map();
-    np.tracks.forEach((t) => { const nid = uid(); tmap.set(t.id, nid); t.id = nid; t.audioId = t.audioId ? remap.get(t.audioId) : null; delete t.cleanInfo; });
+    np.tracks.forEach((t) => { const nid = uid(); tmap.set(t.id, nid); t.id = nid; t.audioId = t.audioId ? remap.get(t.audioId) : null; delete t.cleanInfo; delete t.undo; });
     np.tracks.forEach((t) => { if (t.harmonyOf) t.harmonyOf = tmap.get(t.harmonyOf) || null; });
     np.tracks = np.tracks.filter((t) => t.audioId !== undefined);
     await Store.putProject(np);
@@ -573,7 +582,7 @@ async function autoBpm(tr, silent) {
 
 // ---------------- track ops ----------------
 function dropAudioIfUnused(audioId) {
-  if (!audioId || project.tracks.some((t) => t.audioId === audioId)) return;
+  if (!audioId || project.tracks.some((t) => t.audioId === audioId || (t.undo && t.undo.audioId === audioId))) return;
   Store.deleteAudio(audioId).catch(() => {});
   Store.deleteAnalysis(audioId).catch(() => {});
   for (let k = -12; k <= 12; k++) if (k) Store.deleteAudio(audioId + '@k' + k).catch(() => {});
@@ -586,6 +595,7 @@ async function deleteTrack(tr) {
   project.tracks = project.tracks.filter((t) => t.id !== tr.id);
   processed.delete(tr.id);
   dropAudioIfUnused(tr.audioId);
+  if (tr.undo) dropAudioIfUnused(tr.undo.audioId);
   selectedId = null;
   saveProject();
   refreshStudio();
@@ -594,7 +604,7 @@ function duplicateTrack(tr) {
   if (project.tracks.length >= MAX_TRACKS) { toast(`トラックは最大${MAX_TRACKS}本までです`); return; }
   const c = clone(tr);
   c.id = uid(); c.name = tr.name + ' 複製'; c.color = tr.kind === 'backing' ? BACKING_COLOR : nextColor(); c.solo = false;
-  delete c.cleanInfo;
+  delete c.cleanInfo; delete c.undo;
   project.tracks.splice(project.tracks.indexOf(tr) + 1, 0, c);
   if (needsProcessing(c)) processTrack(c);
   selectedId = c.id;
@@ -603,7 +613,7 @@ function duplicateTrack(tr) {
 }
 function copyTrack(tr) {
   trackClip = { track: clone(tr), projectId: project.id };
-  delete trackClip.track.cleanInfo;
+  delete trackClip.track.cleanInfo; delete trackClip.track.undo;
   toast(`「${tr.name}」をコピーしました（＋から貼り付け）`);
 }
 async function pasteTrack() {
@@ -1115,7 +1125,43 @@ async function stopRecording() {
   toast('録音しました。もう一度 ● で、このトラックに続けて録音できます', 3200);
 }
 
+// keep the previous take so the last recording can be undone
+function saveUndo(tr) {
+  const prev = tr.undo;
+  tr.undo = { audioId: tr.audioId, offset: tr.offset, notes: tr.pitch.notes ? clone(tr.pitch.notes) : null, cuts: clone(tr.cuts) };
+  if (prev && prev.audioId) dropAudioIfUnused(prev.audioId);
+}
+async function undoTake(tr) {
+  const u = tr.undo;
+  if (!u) return;
+  stopAll();
+  if (u.audioId && !buffers.has(u.audioId)) {
+    const a = await Store.getAudio(u.audioId).catch(() => null);
+    if (!a) { toast('元の録音が見つかりませんでした'); tr.undo = null; renderSheet(); return; }
+    buffers.set(a.id, toAudioBuffer(a));
+  }
+  const cur = tr.audioId;
+  tr.audioId = u.audioId; tr.offset = u.offset; tr.pitch.notes = u.notes; tr.cuts = u.cuts || [];
+  tr.undo = null;
+  processed.delete(tr.id);
+  dropAudioIfUnused(cur);
+  saveProject(); refreshStudio();
+  if (needsProcessing(tr)) processTrack(tr);
+  toast('直前の録音を取り消しました');
+}
+async function clearTake(tr) {
+  if (!(await confirmModal('最初から録り直す', `「${tr.name}」の録音を消して空のトラックにします（直後なら「直前の録音を取り消す」で戻せます）。`, '消して録り直す', true))) return;
+  stopAll();
+  saveUndo(tr);
+  tr.audioId = null; tr.pitch.notes = null; tr.cuts = []; tr.offset = 0;
+  processed.delete(tr.id);
+  project.lastRecId = tr.id;
+  saveProject(); refreshStudio();
+  toast('空にしました。録りたい位置で ● を押してください', 3000);
+}
+
 async function recordIntoEmpty(tr, data, sr, offset) {
+  saveUndo(tr);
   const audioId = uid();
   const channels = [data.slice()];
   try { await Store.putAudio({ id: audioId, sr, channels }); } catch (e) { infoModal('保存できませんでした', '端末の空き容量が足りない可能性があります。'); refreshStudio(); return; }
@@ -1152,6 +1198,7 @@ async function punchIn(tr, take, takeSr, takeStart) {
     out[j] = out[j] * (1 - w) + newData[i] * w;
   }
   const oldId = tr.audioId, audioId = uid();
+  saveUndo(tr);
   try { await Store.putAudio({ id: audioId, sr, channels: [out] }); } catch (e) { busy(false); infoModal('保存できませんでした', '端末の空き容量が足りない可能性があります。'); return; }
   buffers.set(audioId, toAudioBuffer({ sr, channels: [out] }));
   const shiftSec = oStart - rStart;
@@ -1161,7 +1208,6 @@ async function punchIn(tr, take, takeSr, takeStart) {
   tr.cuts = tr.cuts.map(([a, b]) => [a + shiftSec, b + shiftSec]).filter(([a, b]) => b < nStart - rStart || a > nEnd - rStart);
   tr.pitch.notes = null;
   processed.delete(tr.id);
-  dropAudioIfUnused(oldId);
   if (oldNotes || tr.pitch.enabled) {
     try {
       const an = await ensureAnalysis(audioId, (p) => busy('音程を解析中…', p));
@@ -1182,7 +1228,7 @@ async function punchIn(tr, take, takeSr, takeStart) {
   saveProject(); refreshStudio();
   processTrack(tr);
   const linked = project.tracks.some((t) => t.harmonyOf === tr.id);
-  toast(linked ? 'つなげて録音しました。ハモリは作り直してください' : `${fmtTime(rec.punchPos)}から録り直しました`, 3000);
+  toast(linked ? 'つなげて録音しました。ハモリは作り直してください' : `${fmtTime(rec.punchPos)}から録音しました（取り消しはミックスタブ）`, 3000);
 }
 
 // ---------------- track sheet ----------------
@@ -1216,6 +1262,11 @@ function renderSheet() {
 function trackChanged(tr, rebuild) { engine.updateTrack(project, tr); saveProject(); if (rebuild) renderSheet(); }
 
 function buildMixTab(body, tr) {
+  if (isVox(tr)) {
+    body.append(h('div', { class: 'mini-btns grid2', style: 'margin:0 0 10px' },
+      h('button', { disabled: !tr.undo, onclick: () => undoTake(tr) }, '↶ 直前の録音を取り消す'),
+      h('button', { disabled: !tr.audioId, onclick: () => clearTake(tr) }, '最初から録り直す')));
+  }
   body.append(
     slider({ label: '音量', min: -36, max: 6, step: 0.5, value: tr.vol, fmt: fmtDb, oninput: (v) => { tr.vol = v; trackChanged(tr); } }),
     slider({ label: 'パン', min: -1, max: 1, step: 0.05, value: tr.pan, fmt: (v) => Math.abs(v) < 0.025 ? 'C' : (v < 0 ? 'L' : 'R') + Math.round(Math.abs(v) * 100), oninput: (v) => { tr.pan = v; trackChanged(tr); } }));
@@ -1312,9 +1363,17 @@ function fxDetail(body, fx, vox, changed, backing) {
     slider({ label: 'アタック', min: 1, max: 80, step: 1, value: c.attack, fmt: (v) => v + ' ms', oninput: (v) => { c.attack = v; ch(); } }),
     slider({ label: 'リリース', min: 20, max: 400, step: 5, value: c.release, fmt: (v) => v + ' ms', oninput: (v) => { c.release = v; ch(); } }),
     slider({ label: '音量補正', min: -12, max: 12, step: 0.5, value: fx.gain, fmt: fmtDb, oninput: (v) => { fx.gain = v; ch(); } })));
+  if (vox) {
+    const presetsDs = [['0', 'オフ'], ['0.3', '弱'], ['0.5', '中'], ['0.75', '強']];
+    body.append(section('ディエッサー（サ行の刺さり）', false,
+      h('p', { class: 'hint note' }, '「さしすせそ」の耳に痛いシュッという音だけを抑えます。'),
+      chips(presetsDs, presetsDs.find((x) => Math.abs(+x[0] - fx.deess.amount) < 0.01) ? presetsDs.find((x) => Math.abs(+x[0] - fx.deess.amount) < 0.01)[0] : null, (v) => { fx.deess.amount = +v; ch(); renderSheet(); }),
+      slider({ label: 'かかり具合', min: 0, max: 1, step: 0.05, value: fx.deess.amount, fmt: (v) => v === 0 ? 'オフ' : fmtPct(v), oninput: (v) => { fx.deess.amount = v; ch(); } }),
+      slider({ label: '周波数', min: 4000, max: 10000, step: 100, value: fx.deess.f, fmt: fmtHz, oninput: (v) => { fx.deess.f = v; ch(); } }),
+      h('p', { class: 'hint note' }, '女性・高い声は 7〜8kHz、男性・低い声は 5〜6kHz が目安です。')));
+  }
   const col = fx.color;
   const tone = section('音色・特殊効果', false,
-    vox ? slider({ label: 'ディエッサー', min: 0, max: 1, step: 0.05, value: fx.deess.amount, fmt: fmtPct, oninput: (v) => { fx.deess.amount = v; ch(); } }) : null,
     slider({ label: 'サチュレーション', min: 0, max: 1, step: 0.05, value: fx.sat, fmt: fmtPct, oninput: (v) => { fx.sat = v; ch(); } }),
     !backing ? slider({ label: 'ダブラー', min: 0, max: 1, step: 0.05, value: fx.doubler, fmt: fmtPct, oninput: (v) => { fx.doubler = v; ch(); } }) : null,
     h('div', { class: 'lbl-line' }, '特殊効果'),
@@ -1392,7 +1451,7 @@ function buildGroupFxTab(body, gr) {
   if (gr.key === 'master') body.append(switchRow('リミッター（音割れ防止）', gs.limiter, (v) => { gs.limiter = v; changed(); }));
   body.append(presetGrid(gr.cat, gs.fx.preset, (k, t) => { gs.fx = t ? clone(t.fx) : fxFromPreset(k); gs.fx.preset = k; migrateFx(gs.fx); changed(); renderSheet(); }));
   fxTools(body, gs.fx, gr.cat, (nfx) => { gs.fx = nfx; changed(); renderSheet(); }, gr.name);
-  fxDetail(body, gs.fx, false, changed, true);
+  fxDetail(body, gs.fx, gr.key === 'vocal', changed, true);
 }
 const BALANCE_TPL = [
   { id: 'front', name: '歌を前に', desc: '歌ってみたの定番', lu: 1.5 },
@@ -1911,6 +1970,39 @@ function offerFile(blob, filename, title, sub) {
 }
 
 // ---------------- backup ----------------
+// one file containing every project (for moving to a new URL or keeping a safe copy)
+async function exportAllBackup(list) {
+  busy('バックアップを作成中…');
+  try {
+    const audios = [], parts = [];
+    const seen = new Set();
+    const pjs = [];
+    for (const p of list) {
+      const pj = clone(p);
+      pj.tracks.forEach((t) => { delete t.cleanInfo; delete t.undo; });
+      pjs.push(pj);
+      for (const id of new Set(p.tracks.map((t) => t.audioId).filter(Boolean))) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const a = await Store.getAudio(id);
+        if (!a) continue;
+        audios.push({ id, sr: a.sr, nch: a.channels.length, len: a.channels[0].length });
+        for (const ch of a.channels) parts.push(ch.buffer.byteLength === ch.length * 4 ? ch.buffer : ch.slice().buffer);
+      }
+    }
+    const header = new TextEncoder().encode(JSON.stringify({ format: 'utamix', version: 4, projects: pjs, audios }));
+    const pre = new ArrayBuffer(16), dv = new DataView(pre);
+    'UTAMIX01'.split('').forEach((ch, i) => dv.setUint8(i, ch.charCodeAt(0)));
+    dv.setUint32(8, header.length, true);
+    const pad = (4 - ((16 + header.length) % 4)) % 4;
+    dv.setUint32(12, pad, true);
+    const blob = new Blob([pre, header, new Uint8Array(pad), ...parts], { type: 'application/octet-stream' });
+    busy(false);
+    const d = new Date();
+    offerFile(blob, `UtaMix_all_${d.getMonth() + 1}-${d.getDate()}.utamix`, 'バックアップを作成しました', `${list.length}件 · ${(blob.size / 1048576).toFixed(1)} MB`);
+  } catch (e) { busy(false); infoModal('バックアップに失敗しました', String(e.message || e)); }
+}
+
 async function exportBackup(p) {
   busy('バックアップを作成中…');
   try {
@@ -1922,7 +2014,7 @@ async function exportBackup(p) {
       for (const ch of a.channels) parts.push(ch.buffer.byteLength === ch.length * 4 ? ch.buffer : ch.slice().buffer);
     }
     const pj = clone(p);
-    pj.tracks.forEach((t) => delete t.cleanInfo);
+    pj.tracks.forEach((t) => { delete t.cleanInfo; delete t.undo; });
     const header = new TextEncoder().encode(JSON.stringify({ format: 'utamix', version: 3, project: pj, audios }));
     const pre = new ArrayBuffer(16), dv = new DataView(pre);
     'UTAMIX01'.split('').forEach((ch, i) => dv.setUint8(i, ch.charCodeAt(0)));
@@ -1951,14 +2043,16 @@ async function importBackup(file) {
       remap.set(a.id, nid);
       await Store.putAudio({ id: nid, sr: a.sr, channels });
     }
-    const p = meta.project;
-    p.id = uid(); p.updatedAt = Date.now();
-    const tmap = new Map();
-    p.tracks.forEach((t) => { const nid = uid(); tmap.set(t.id, nid); t.id = nid; t.audioId = t.audioId ? remap.get(t.audioId) : null; });
-    p.tracks.forEach((t) => { if (t.harmonyOf) t.harmonyOf = tmap.get(t.harmonyOf) || null; });
-    p.tracks = p.tracks.filter((t) => t.audioId !== undefined);
-    await Store.putProject(p);
-    busy(false); toast('読み込みました'); showHome();
+    const list = meta.projects || [meta.project];
+    for (const p of list) {
+      p.id = uid(); p.updatedAt = Date.now();
+      const tmap = new Map();
+      p.tracks.forEach((t) => { const nid = uid(); tmap.set(t.id, nid); t.id = nid; t.audioId = t.audioId ? remap.get(t.audioId) : null; delete t.undo; });
+      p.tracks.forEach((t) => { if (t.harmonyOf) t.harmonyOf = tmap.get(t.harmonyOf) || null; });
+      p.tracks = p.tracks.filter((t) => t.audioId !== undefined);
+      await Store.putProject(p);
+    }
+    busy(false); toast(`${list.length}件のプロジェクトを読み込みました`); showHome();
   } catch (e) { busy(false); infoModal('読み込めませんでした', String(e.message || e)); }
 }
 
@@ -2001,8 +2095,8 @@ function addTrackMenu() {
     const ch = (ic, t, sub, fn, dis) => h('button', { class: 'choice', style: dis ? 'opacity:.4' : '', onclick: () => { if (dis) { toast(`トラックは最大${MAX_TRACKS}本までです`); return; } close(); fn(); } }, h('span', { class: 'ic' }, ic), h('div', {}, h('b', {}, t), h('small', {}, sub)));
     c.append(h('h3', {}, 'トラックを追加'),
       ch('📁', '音源を読み込む', 'WAV・MP3・M4A・動画など（複数可）', () => $('fileAudio').click(), full),
-      ch('🎤', '空のメイントラック', '追加して選択します（録音は ● を押したとき）', () => addEmptyTrack('vocal'), full),
-      ch('🎶', '空のハモリトラック', '追加して選択します（録音は ● を押したとき）', () => addEmptyTrack('harmony'), full),
+      ch('🎤', '新しいボーカルトラックを追加', '録音は ● を押したときだけ始まります', () => addEmptyTrack('vocal'), full),
+      ch('🎶', '新しいハモリトラックを追加', '録音は ● を押したときだけ始まります', () => addEmptyTrack('harmony'), full),
       trackClip ? ch('📋', 'コピーしたトラックを貼り付け', trackClip.track.name, pasteTrack, full) : null,
       h('div', { class: 'actions' }, h('button', { class: 'big-btn ghost', onclick: close }, 'キャンセル')));
   });
@@ -2016,7 +2110,7 @@ function addEmptyTrack(kind) {
   settings.recTarget = 'auto'; saveSettings();
   saveProject(); refreshStudio();
   TL.scrollY = Math.max(0, project.tracks.length * LANE_H - TL.h + 20); clampScroll(); renderLaneHeads(); drawTimeline();
-  toast('トラックを追加しました。録音位置を決めて ● で録音できます', 3000);
+  toast('トラックを追加しました。● を押すと録音が始まります', 3000);
 }
 
 function aboutModal() {
