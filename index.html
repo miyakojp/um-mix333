@@ -59,23 +59,10 @@
   <div class="toolrow">
     <button class="chip auto" id="btnAuto">✨ 自動MIX</button>
     <button class="chip" id="btnKey">C · 120</button>
-    <button class="chip" id="btnEdit">✂ 編集</button>
+    <button class="chip on" id="btnFollow">⇥ 追尾</button>
     <button class="chip" id="btnLyrics">歌詞</button>
     <button class="chip rec" id="btnRecTarget">● 新規メイン</button>
   </div>
-  <div class="editbar hidden" id="editBar">
-    <div class="eb-hint" id="ebHint">波形をドラッグで移動・両端をドラッグでトリミング</div>
-    <div class="eb-btns">
-      <button id="ebSplit">✂ 分割</button>
-      <button id="ebCutL">⇤ 前を削除</button>
-      <button id="ebCutR">後を削除 ⇥</button>
-      <button id="ebDup">⧉ 複製</button>
-      <button id="ebDel">🗑 削除</button>
-      <button id="ebSnap">吸着</button>
-      <button id="ebDone" class="done">完了</button>
-    </div>
-  </div>
-
   <div class="timeline">
     <div class="ruler-row">
       <div class="ruler-corner" id="timeDisp">0:00.0</div>
@@ -87,6 +74,18 @@
       <div class="lanes-empty" id="lanesEmpty">
         <p>まずはカラオケ（伴奏）を読み込みましょう</p>
         <button class="big-btn primary small" id="btnAddFirst">＋ 音源を読み込む</button>
+      </div>
+      <div class="clipbar hidden" id="editBar">
+        <div class="cb-info"><span id="ebInfo"></span><span class="cb-hint">ドラッグで移動・黄色い端でトリミング</span><button id="ebDone" aria-label="選択解除">✕</button></div>
+        <div class="cb-btns">
+          <button id="ebSplit"><i>✂</i>分割</button>
+          <button id="ebCutL"><i>⇤</i>前をカット</button>
+          <button id="ebCutR"><i>⇥</i>後をカット</button>
+          <button id="ebJoin"><i>⊕</i>結合</button>
+          <button id="ebDup"><i>⧉</i>複製</button>
+          <button id="ebDel" class="del"><i>🗑</i>削除</button>
+          <button id="ebSnap"><i>⌗</i>拍に吸着</button>
+        </div>
       </div>
       <div class="lyrics-pane hidden" id="lyricsPane">
         <div class="lp-head"><b>歌詞・メモ</b><button class="icon-btn small" id="lpEdit" aria-label="編集">✎</button><button class="icon-btn small" id="lpClose" aria-label="閉じる">×</button></div>
@@ -154,6 +153,7 @@
   </div>
   <div class="pe-tools sub">
     <button class="tog" id="peSnap" aria-pressed="true">スナップ</button>
+    <button class="tog" id="peFollow" aria-pressed="true">追尾</button>
     <button class="tog" id="peAB" aria-pressed="true">補正 ON</button>
     <button class="tog" id="peWithBacking" aria-pressed="true">伴奏も再生</button>
     <button class="tog" id="peRef" aria-pressed="false">参照：なし</button>

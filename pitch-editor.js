@@ -107,6 +107,7 @@ export class PitchEditor {
     const set = (id, on, label) => { const b = this.root.querySelector(id); b.setAttribute('aria-pressed', on ? 'true' : 'false'); if (label) b.textContent = label; };
     set('#peTune', tr.pitch.tuneOn, tr.pitch.tuneOn ? 'オートチューン ON' : 'オートチューン');
     set('#peSnap', this.snap);
+    if (this.api.follow) set('#peFollow', this.api.follow(), this.api.follow() ? '追尾' : '追尾オフ');
     set('#peAB', tr.pitch.enabled, tr.pitch.enabled ? '補正 ON' : '補正 OFF');
     set('#peWithBacking', this.withBacking);
     const ref = this.refTrack();
@@ -341,7 +342,7 @@ export class PitchEditor {
     if (!this.isOpen) return;
     const moved = Math.abs(pos - this.pos) > 1e-4;
     this.pos = pos;
-    if (this.api.isPlaying()) {
+    if (this.api.isPlaying() && (!this.api.follow || this.api.follow())) {
       const px = this.x(pos);
       if (px > this.W * 0.82 || px < KW) this.t0 = pos - (this.W - KW) * 0.12 / this.pps;
     }
@@ -350,7 +351,7 @@ export class PitchEditor {
 
   // ---------- editing ----------
   snapshot() { return JSON.stringify({ notes: this.tr.pitch.notes, cuts: this.tr.cuts }); }
-  pushUndo() { this.undoStack.push(this.snapshot()); if (this.undoStack.length > 80) this.undoStack.shift(); this.redoStack = []; }
+  pushUndo() { this.undoStack.push(this.snapshot()); this.redoStack = []; }
   restore(s) { const o = JSON.parse(s); this.tr.pitch.notes = o.notes; this.tr.cuts = o.cuts; this.sel = new Set(); this.selCut = -1; this.committed(); }
   undo() { if (!this.undoStack.length) return; this.redoStack.push(this.snapshot()); this.restore(this.undoStack.pop()); }
   redo() { if (!this.redoStack.length) return; this.undoStack.push(this.snapshot()); this.restore(this.redoStack.pop()); }
@@ -584,6 +585,7 @@ export class PitchEditor {
     q('#peUndo').onclick = () => this.undo();
     q('#peRedo').onclick = () => this.redo();
     q('#peSnap').onclick = () => { this.snap = !this.snap; this.syncHeader(); };
+    q('#peFollow').onclick = () => { if (this.api.setFollow) this.api.setFollow(!this.api.follow()); this.syncHeader(); };
     q('#peAB').onclick = () => {
       this.tr.pitch.enabled = !this.tr.pitch.enabled;
       this.api.saveProject();

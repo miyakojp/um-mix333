@@ -39,11 +39,13 @@ export const PRESETS = {
   vtuber: V({ name: 'キラキラ', desc: 'VTuber系の明るい抜け', hpf: 120, eq: eqBands([320, -3], [1000, -1.5], [4000, 3], [12500, 5]), deess: { f: 7000, amount: 0.6 }, comp: comp(-26, 4, 8, 80, 6), sat: 0.08, doubler: 0.2, rev: 0.26, dly: 0.16 }),
   kawaii: V({ name: 'かわいい', desc: '軽やかで高域キラッ', hpf: 130, eq: eqBands([300, -2.5], [1000, -1], [4200, 2.5], [12500, 4.5]), deess: { f: 7200, amount: 0.55 }, comp: comp(-24, 3.5, 10, 90, 6), sat: 0.05, doubler: 0.1, rev: 0.25, dly: 0.14 }),
   ballad: V({ name: 'バラード', desc: '柔らかく広い響き', hpf: 80, eq: eqBands([250, -2], [1000, 0], [2500, 1.5], [10000, 3]), deess: { f: 6000, amount: 0.35 }, comp: comp(-20, 2.5, 25, 150, 10), rev: 0.36, dly: 0.16 }),
+  band: V({ name: 'バンドボーカル', desc: 'バンドに負けない太さと抜け', hpf: 110, eq: eqBands([350, -2.5], [1200, 1.5], [3000, 3], [10000, 2]), deess: { f: 6800, amount: 0.5 }, comp: comp(-27, 4.5, 5, 70, 4), sat: 0.22, doubler: 0.12, rev: 0.16, dly: 0.12 }),
   rock: V({ name: 'ロック', desc: '芯のある力強い声', hpf: 120, eq: eqBands([400, -2], [1200, 1], [2200, 3.5], [9000, 1.5]), comp: comp(-26, 5, 6, 60, 4), sat: 0.35, doubler: 0.1, rev: 0.12, dly: 0.1 }),
   whisper: V({ name: 'ウィスパー', desc: '息っぽく近い', hpf: 100, eq: eqBands([300, -1], [800, -1.5], [4500, 2], [13000, 5]), deess: { f: 7200, amount: 0.6 }, comp: comp(-28, 3.5, 12, 100, 8), rev: 0.15, dly: 0.04 }),
   flat: V({ name: 'なし', desc: 'エフェクトなし', hpf: 0, eq: eqBands([300, 0], [1000, 0], [3500, 0], [11000, 0]), deess: { f: 6500, amount: 0 }, comp: COMP_OFF, rev: 0, dly: 0 }),
   // ---- main vocal: キャラ（よく使われる質感）
   cool: V({ group: 'char', name: 'クール', desc: '低めで落ち着いた艶', hpf: 90, eq: eqBands([250, -1], [800, -1], [3000, 1.5], [10000, 2.5]), comp: comp(-22, 3, 15, 120, 8), sat: 0.15, rev: 0.3, dly: 0.12 }),
+  band_emo: V({ group: 'char', name: 'エモ・パワー', desc: '熱量のあるバンド歌唱', hpf: 120, eq: eqBands([400, -3], [1500, 2], [2800, 3.5], [9500, 2]), deess: { f: 7000, amount: 0.55 }, comp: comp(-30, 6, 3, 60, 3), sat: 0.4, doubler: 0.25, rev: 0.18, dly: 0.14 }),
   shout: V({ group: 'char', name: 'シャウト', desc: '歪んだ叫び声', hpf: 150, eq: eqBands([400, -3], [1500, 2], [2800, 4], [9000, 0]), comp: comp(-30, 8, 3, 50, 2), sat: 0.85, rev: 0.12, dly: 0.08 }),
   echo: V({ group: 'char', name: 'エコー', desc: '山びこのような反復', hpf: 120, eq: eqBands([300, -2], [1000, 0], [3500, 2], [11000, 2]), comp: comp(-22, 3, 12, 100, 8), rev: 0.3, dly: 0.5 }),
   bighall: V({ group: 'char', name: '大ホール', desc: 'ライブ会場の残響', hpf: 100, eq: eqBands([300, -2], [1000, 0], [3000, 1.5], [11000, 2]), comp: comp(-22, 3, 15, 120, 8), rev: 0.6, dly: 0.12 }),
@@ -65,6 +67,9 @@ export const PRESETS = {
   b_space: B({ name: '歌の居場所', desc: '声の帯域を空ける', hpf: 30, eq: eqBack([100, 0], [400, -1], [2800, -2.5], [10000, 0]) }),
   b_clean: B({ name: '低音すっきり', desc: 'モコモコを整理', hpf: 40, eq: eqBack([110, -2], [300, -1.5], [2800, 0], [10000, 0.5]) }),
   b_bright: B({ name: '明るく', desc: 'キラキラ感を足す', hpf: 30, eq: eqBack([100, 0.5], [400, -0.5], [3000, 1], [10000, 2.5]) }),
+  b_band: B({ name: 'バンド', desc: 'ドラム・ベースの迫力を残して歌の場所を空ける', hpf: 30, eq: eqBack([90, 1.5], [400, -1.5], [2800, -2], [10000, 1.5]), comp: comp(-16, 2.5, 25, 180, 8), sat: 0.08 }),
+  b_live: B({ name: 'ライブバンド', desc: 'ライブハウスの勢いと厚み', hpf: 30, eq: eqBack([80, 2], [400, -2], [2600, -1.5], [9000, 1]), comp: comp(-18, 3, 20, 150, 6), sat: 0.14, rev: 0.06 }),
+  b_acoustic: B({ name: 'アコースティック', desc: 'ギター・ピアノを自然に', hpf: 40, eq: eqBack([110, -1], [350, -1], [2800, -1], [11000, 1.5]), comp: comp(-14, 1.8, 30, 220, 10) }),
   b_glue: B({ name: 'まとまり', desc: '軽いコンプで一体感', hpf: 30, eq: eqBack([100, 0], [400, 0], [2800, -1.5], [10000, 0.5]), comp: comp(-18, 2, 30, 200, 10) }),
   // ---- group buses
   gv_flat: G('gvocal', { name: 'なし', desc: '素通し', eq: eqBands([300, 0], [1000, 0], [3500, 0], [11000, 0]) }),
@@ -74,10 +79,13 @@ export const PRESETS = {
   gb_flat: G('gbacking', { name: 'なし', desc: '素通し', eq: eqBack([100, 0], [400, 0], [2800, 0], [10000, 0]) }),
   gb_space: G('gbacking', { name: '歌の居場所', desc: '2〜4kHzを少し空ける', eq: eqBack([100, 0], [400, -0.5], [2800, -2], [10000, 0]) }),
   gb_punch: G('gbacking', { name: '迫力', desc: '低音と一体感を足す', eq: eqBack([90, 1.5], [400, -1], [2800, -1], [10000, 1]), comp: comp(-16, 2, 30, 200, 10) }),
+  gb_band: G('gbacking', { name: 'バンドの迫力', desc: 'キックとベースを太く', eq: eqBack([80, 2], [400, -1.5], [2800, -1.5], [10000, 1]), comp: comp(-17, 2.5, 25, 180, 8), sat: 0.1 }),
   gb_soft: G('gbacking', { name: '控えめ', desc: '伴奏を少し引っ込める', eq: eqBack([100, -1], [400, 0], [2800, -1.5], [10000, -1]) }),
   gm_flat: G('gmaster', { name: 'なし', desc: '素通し', eq: eqBack([100, 0], [400, 0], [2800, 0], [10000, 0]) }),
   gm_natural: G('gmaster', { name: 'ナチュラル', desc: '軽くまとめる', eq: eqBack([100, 0], [400, 0], [2800, 0], [11000, 0.5]), comp: comp(-12, 1.5, 30, 200, 10) }),
   gm_loud: G('gmaster', { name: '音圧', desc: '迫力のある仕上がり', eq: eqBack([90, 1], [400, -0.5], [2800, 0], [11000, 1]), comp: comp(-16, 2.5, 20, 150, 8), sat: 0.12 }),
+  gm_video: G('gmaster', { name: '歌ってみた動画', desc: 'YouTube・ニコニコ向け。明るく前に出る', eq: eqBack([90, 1], [350, -1], [3000, 1], [12000, 2]), comp: comp(-15, 2.2, 20, 160, 8), sat: 0.08 }),
+  gm_cd: G('gmaster', { name: 'CD仕様', desc: '44.1kHz/16bit・大きめの音圧で仕上げる', eq: eqBack([80, 1.5], [400, -0.5], [2800, 0.5], [11000, 1.5]), comp: comp(-18, 3, 15, 140, 6), sat: 0.15 }),
   gm_clear: G('gmaster', { name: 'クリア', desc: '抜けよく明るく', eq: eqBack([100, -0.5], [350, -1], [3000, 0.5], [12000, 2]), comp: comp(-12, 1.5, 30, 200, 10) }),
 };
 export const PRESET_GROUPS = { std: '定番', char: 'キャラ', sfx: '特殊' };
@@ -593,6 +601,16 @@ export class Engine {
 }
 
 // Offline mixdown. include(track) decides which tracks to render.
+function renderWithTimeout(ctx, ms) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('書き出し処理が止まってしまいました。アプリを開き直して、もう一度お試しください。')), ms);
+    ctx.startRendering().then((b) => { clearTimeout(t); resolve(b); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+// Offline mixdown. include(track) decides which tracks to render.
+// Long songs are rendered in short pieces (each with a few seconds of warm-up so compressors,
+// reverb and delay continue naturally, joined with a short crossfade). This keeps memory low and
+// shows real progress on iPhone instead of one huge render that can stall.
 export async function renderMix(project, bufferFor, sampleRate, include, onProgress, opts = {}) {
   let end = 0;
   for (const tr of project.tracks) {
@@ -601,24 +619,51 @@ export async function renderMix(project, bufferFor, sampleRate, include, onProgr
     if (b) for (const c of clipsOf(tr, b)) end = Math.max(end, c.at + (Math.min(c.b, b.duration) - c.a));
   }
   if (end <= 0) throw new Error('書き出す音がありません');
+  const sr = sampleRate;
   const from = Math.max(0, Math.min(opts.from || 0, end - 1));
   let span = end - from;
   if (opts.maxSec) span = Math.min(span, opts.maxSec);
   const tail = opts.noTail ? 0.2 : 3.0;
-  const length = Math.ceil((span + tail) * sampleRate);
+  const total = Math.ceil((span + tail) * sr);
   const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  const ctx = new OAC(2, length, sampleRate);
   const proj = Object.assign({}, project, { tracks: project.tracks.map((t) => Object.assign({}, t, { solo: false, mute: include ? !include(t) : t.mute })) });
-  const graph = buildGraph(ctx, proj, include, false);
-  startSources(ctx, proj, graph, bufferFor, 0, from);
-  let timer = null;
-  if (onProgress) timer = setInterval(() => { try { onProgress(Math.min(0.99, ctx.currentTime / (length / sampleRate))); } catch (e) { /* ignore */ } }, 200);
-  const out = await ctx.startRendering();
-  if (timer) clearInterval(timer);
-  const L = out.getChannelData(0), R = out.getChannelData(1);
-  let last = out.length - 1;
-  while (last > (span * sampleRate) && Math.abs(L[last]) < 1e-4 && Math.abs(R[last]) < 1e-4) last--;
-  return { L: L.subarray(0, last + 1), R: R.subarray(0, last + 1), sampleRate };
+  const segN = Math.round((opts.segment || 1e9) * sr), warmN = Math.round(4 * sr), xf = Math.round(0.05 * sr);
+  const fromN = Math.round(from * sr);
+  let L, R;
+  if (total <= segN + 2 * sr) {
+    const ctx = new OAC(2, total, sr);
+    const graph = buildGraph(ctx, proj, include, false);
+    startSources(ctx, proj, graph, bufferFor, 0, from);
+    let timer = null;
+    const t0 = performance.now();
+    if (onProgress) timer = setInterval(() => { try { onProgress(Math.min(0.99, ctx.currentTime / (total / sr)), (performance.now() - t0) / 1000); } catch (e) { /* ignore */ } }, 250);
+    try { const out = await renderWithTimeout(ctx, Math.max(120000, span * 4000)); L = out.getChannelData(0); R = out.getChannelData(1); }
+    finally { if (timer) clearInterval(timer); }
+  } else {
+    L = new Float32Array(total); R = new Float32Array(total);
+    const t0 = performance.now();
+    for (let s0 = 0; s0 < total; s0 += segN) {
+      const absN = fromN + s0;
+      const startN = Math.max(0, absN - warmN), pre = absN - startN;
+      const last = s0 + segN >= total;
+      const segLen = Math.min(segN, total - s0) + (last ? 0 : xf);
+      const ctx = new OAC(2, pre + segLen, sr);
+      const graph = buildGraph(ctx, proj, include, false);
+      startSources(ctx, proj, graph, bufferFor, 0, startN / sr);
+      const out = await renderWithTimeout(ctx, 90000);
+      const a = out.getChannelData(0), b = out.getChannelData(1);
+      for (let i = 0; i < segLen && s0 + i < total; i++) {
+        const j = s0 + i;
+        if (s0 > 0 && i < xf) { const w = i / xf; L[j] = L[j] * (1 - w) + a[pre + i] * w; R[j] = R[j] * (1 - w) + b[pre + i] * w; }
+        else { L[j] = a[pre + i]; R[j] = b[pre + i]; }
+      }
+      if (onProgress) onProgress(Math.min(0.99, (s0 + segLen) / total), (performance.now() - t0) / 1000);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+  let lastI = L.length - 1;
+  while (lastI > (span * sr) && Math.abs(L[lastI]) < 1e-4 && Math.abs(R[lastI]) < 1e-4) lastI--;
+  return { L: L.subarray(0, lastI + 1), R: R.subarray(0, lastI + 1), sampleRate: sr };
 }
 
 // writes the WAV in small parts so no single huge allocation is needed
