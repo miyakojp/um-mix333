@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self' blob:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0f1115">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="UtaMix">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="stylesheet" href="app.css">
+<title>UtaMix</title>
+</head>
+<body>
+
+<!-- ============ HOME ============ -->
+<section id="home" class="view">
+  <header class="home-head">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      <div>
+        <h1>UtaMix</h1>
+        <p class="tagline">歌ってみた専用スタジオ</p>
+      </div>
+    </div>
+    <button class="icon-btn" id="btnAbout" aria-label="このアプリについて">?</button>
+  </header>
+  <div class="home-actions">
+    <button class="big-btn primary" id="btnNewProject"><span>＋</span>新しいプロジェクト</button>
+    <button class="big-btn" id="btnImportBackup">バックアップを読み込む</button>
+  </div>
+  <h2 class="list-title">プロジェクト</h2>
+  <ul id="projectList" class="project-list"></ul>
+  <p id="emptyHint" class="empty-hint">まだプロジェクトがありません。<br>「新しいプロジェクト」から始めましょう。</p>
+  <footer class="home-foot">
+    <div id="storageInfo"></div>
+    <div class="privacy-line">🔒 録音・音源はこの端末の中だけに保存されます。外部への送信はありません。</div>
+  </footer>
+</section>
+
+<!-- ============ STUDIO ============ -->
+<section id="studio" class="view hidden">
+  <header class="studio-head">
+    <button class="icon-btn" id="btnBack" aria-label="戻る">‹</button>
+    <button class="proj-name" id="projName"><span id="projNameText">プロジェクト</span></button>
+    <span class="save-state" id="saveState"></span>
+    <button class="icon-btn" id="btnSave" aria-label="保存">✓</button>
+    <button class="icon-btn" id="btnMenu" aria-label="メニュー">⋯</button>
+    <button class="pill accent" id="btnExport">書き出し</button>
+  </header>
+  <div class="toolrow">
+    <button class="chip auto" id="btnAuto">✨ 自動MIX</button>
+    <button class="chip" id="btnKey">C · 120</button>
+    <button class="chip" id="btnLyrics">歌詞</button>
+    <button class="chip rec" id="btnRecTarget">● 新規メイン</button>
+  </div>
+
+  <div class="timeline">
+    <div class="ruler-row">
+      <div class="ruler-corner" id="timeDisp">0:00.0</div>
+      <canvas id="rulerCanvas"></canvas>
+    </div>
+    <div class="lanes" id="lanes">
+      <div class="lane-heads" id="laneHeads"></div>
+      <canvas id="laneCanvas"></canvas>
+      <div class="lanes-empty" id="lanesEmpty">
+        <p>まずはカラオケ（伴奏）を読み込みましょう</p>
+        <button class="big-btn primary small" id="btnAddFirst">＋ 音源を読み込む</button>
+      </div>
+      <div class="lyrics-pane hidden" id="lyricsPane">
+        <div class="lp-head"><b>歌詞・メモ</b><button class="icon-btn small" id="lpEdit" aria-label="編集">✎</button><button class="icon-btn small" id="lpClose" aria-label="閉じる">×</button></div>
+        <div class="lp-body" id="lpBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bgbar hidden" id="bgBar">
+    <span class="bg-dot"></span>
+    <span id="bgText">バックグラウンド再生</span>
+    <button class="pill" id="bgToggle">❚❚</button>
+    <button class="pill" id="bgStop">停止</button>
+  </div>
+
+  <div class="transport">
+    <button class="t-btn" id="btnAddTrack" aria-label="トラック追加">＋</button>
+    <button class="t-btn" id="btnHome" aria-label="先頭へ">⏮</button>
+    <button class="t-btn play" id="btnPlay" aria-label="再生">▶</button>
+    <button class="t-btn rec" id="btnRec" aria-label="録音"><i></i></button>
+    <div class="meter" aria-hidden="true"><div id="meterBar"></div></div>
+  </div>
+
+  <div class="sheet hidden" id="trackSheet">
+    <div class="sheet-grip" id="sheetGrip"><span></span></div>
+    <div class="sheet-head">
+      <button class="icon-btn small" id="tsPrev" aria-label="前のトラック">‹</button>
+      <span class="sw" id="tsColor"></span>
+      <strong id="tsName">トラック</strong>
+      <span class="kind" id="tsKind"></span>
+      <button class="icon-btn small" id="tsNext" aria-label="次のトラック">›</button>
+      <button class="icon-btn small" id="tsClose" aria-label="閉じる">×</button>
+    </div>
+    <nav class="tabs" id="tsTabs">
+      <button data-tab="mix" class="on">ミックス</button>
+      <button data-tab="fx">エフェクト</button>
+      <button data-tab="clean">ノイズ</button>
+      <button data-tab="pitch">ピッチ</button>
+      <button data-tab="harm">ハモリ</button>
+      <button data-tab="key">キー</button>
+    </nav>
+    <div class="sheet-body" id="tsBody"></div>
+  </div>
+</section>
+
+<!-- ============ PITCH EDITOR ============ -->
+<section id="pitch" class="view hidden">
+  <header class="pe-head">
+    <button class="icon-btn" id="peBack" aria-label="戻る">‹</button>
+    <button class="pe-title" id="peTitle"><strong id="peName">ボーカル</strong><span id="peStatus"></span></button>
+    <button class="chip" id="peKey">キー C</button>
+    <button class="tog" id="peTune" aria-pressed="false">オートチューン</button>
+  </header>
+  <div class="pe-tools">
+    <button class="icon-btn small" id="peUndo" aria-label="元に戻す">↶</button>
+    <button class="icon-btn small" id="peRedo" aria-label="やり直す">↷</button>
+    <div class="seg tools" id="peTool">
+      <button data-tool="pitch" class="on">音程</button>
+      <button data-tool="time">タイミング</button>
+      <button data-tool="amp">音量</button>
+      <button data-tool="formant">声質</button>
+      <button data-tool="cut">カット</button>
+    </div>
+    <button class="icon-btn small play" id="pePlay" aria-label="再生">▶</button>
+  </div>
+  <div class="pe-tools sub">
+    <button class="tog" id="peSnap" aria-pressed="true">スナップ</button>
+    <button class="tog" id="peAB" aria-pressed="true">補正 ON</button>
+    <button class="tog" id="peWithBacking" aria-pressed="true">伴奏も再生</button>
+    <button class="tog" id="peRef" aria-pressed="false">参照：なし</button>
+  </div>
+  <div class="pe-canvas-wrap"><canvas id="peCanvas"></canvas></div>
+  <div class="pe-panel" id="pePanel"></div>
+</section>
+
+<!-- ============ MODAL ============ -->
+<div class="modal hidden" id="modal">
+  <div class="modal-card" id="modalCard"></div>
+</div>
+<div class="toast hidden" id="toast"></div>
+<div class="busy hidden" id="busy"><div class="busy-card"><div class="spinner"></div><p id="busyText">処理中…</p><div class="prog"><div id="busyProg"></div></div></div></div>
+
+<input type="file" id="fileAudio" accept="audio/*,video/*,.wav,.wave,.mp3,.m4a,.aac,.aif,.aiff,.caf,.flac,.ogg,.oga,.opus,.mp4,.m4v,.mov,.webm,.3gp,.amr" multiple hidden>
+<input type="file" id="fileBackup" accept=".utamix,application/octet-stream" hidden>
+
+<script src="dsp-core.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
