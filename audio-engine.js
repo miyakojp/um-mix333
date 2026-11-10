@@ -409,6 +409,30 @@ class Sends {
   }
 }
 
+class LightStrip {
+  constructor(ctx, cfg, dest) {
+    this.ctx = ctx;
+    this.input = ctx.createGain(); this.mute = ctx.createGain(); this.pan = ctx.createStereoPanner();
+    this.input.connect(this.mute); this.mute.connect(this.pan); this.pan.connect(dest);
+    this.update(cfg);
+  }
+  update(cfg) { this.input.gain.value = dbToGain((cfg.clipGain || 0) + (cfg.vol || 0)); this.pan.pan.value = cfg.pan || 0; }
+  setAudible(on) { this.mute.gain.value = on ? 1 : 0; }
+  get reduction() { return 0; }
+  level() { return 0; }
+  dispose() { try { this.pan.disconnect(); } catch (e) { /* ignore */ } }
+}
+function buildLightGraph(ctx, project) {
+  const out = ctx.createGain();
+  const analyser = ctx.createAnalyser(); analyser.fftSize = 1024;
+  out.connect(ctx.destination); out.connect(analyser);
+  const chains = new Map();
+  const anySolo = project.tracks.some((t) => t.solo);
+  for (const tr of project.tracks) { const ch = new LightStrip(ctx, tr, out); ch.setAudible(!tr.mute && (!anySolo || tr.solo)); chains.set(tr.id, ch); }
+  const dummy = { update() {}, dispose() {}, level() { return 0; }, reduction: 0 };
+  return { light: true, master: dummy, gv: dummy, gb: dummy, sends: null, chains, analyser, trim: out, limiter: null };
+}
+
 function buildGraph(ctx, project, only, live) {
   const groups = project.groups;
   const master = new Strip(ctx, { fx: groups.master.fx, vol: groups.master.vol }, null, ctx.createGain(), live);
@@ -442,6 +466,11 @@ function setLimiter(graph, on, t) {
   else { l.threshold.setValueAtTime(0, t); l.ratio.setValueAtTime(1, t); l.knee.setValueAtTime(0, t); }
 }
 
+// track clips: [{at (timeline sec), a, b (sec inside the track's audio)}]
+export function clipsOf(tr, buf) {
+  const cs = tr.clips && tr.clips.length ? tr.clips : (buf ? [{ at: tr.offset || 0, a: 0, b: buf.duration }] : []);
+  return cs;
+}
 function startSources(ctx, project, graph, bufferFor, when, from) {
   const sources = [];
   for (const tr of project.tracks) {
@@ -449,26 +478,33 @@ function startSources(ctx, project, graph, bufferFor, when, from) {
     if (!ch) continue;
     const buf = bufferFor(tr);
     if (!buf) continue;
-    const rel = from - (tr.offset || 0);
-    if (rel >= buf.duration) continue;
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const fg = ctx.createGain();
-    src.connect(fg); fg.connect(ch.input);
+    const clips = clipsOf(tr, buf);
+    if (!clips.length) continue;
+    let tStart = Infinity, tEnd = -Infinity;
+    for (const c of clips) { tStart = Math.min(tStart, c.at); tEnd = Math.max(tEnd, c.at + (Math.min(c.b, buf.duration) - c.a)); }
     const fi = (tr.fade && tr.fade.in) || 0, fo = (tr.fade && tr.fade.out) || 0;
-    const t0 = when - rel;
-    if (fi > 0 || fo > 0) {
-      const p = fg.gain, dur = buf.duration;
-      const at = (pos) => t0 + pos;
-      const startPos = Math.max(0, rel);
-      const lvl = (pos) => Math.min(fi > 0 ? Math.min(1, pos / fi) : 1, fo > 0 ? Math.min(1, (dur - pos) / fo) : 1);
-      p.setValueAtTime(Math.max(0, lvl(startPos)), Math.max(when, at(startPos)));
-      if (fi > 0 && startPos < fi) p.linearRampToValueAtTime(1, at(fi));
-      if (fo > 0) { const st = Math.max(startPos, dur - fo); p.setValueAtTime(Math.max(0, lvl(st)), at(st)); p.linearRampToValueAtTime(0, at(dur)); }
+    for (const c of clips) {
+      const b = Math.min(c.b, buf.duration);
+      if (b - c.a < 0.005) continue;
+      const cs = c.at, ce = c.at + (b - c.a);
+      if (from >= ce) continue;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const fg = ctx.createGain();
+      src.connect(fg); fg.connect(ch.input);
+      const t0 = Math.max(from, cs);
+      const ctxAt = (T) => when + (T - from);
+      // envelope: 4 ms clip edges + track fades (all linear pieces)
+      const edge = 0.004;
+      const env = (T) => Math.max(0, Math.min(1, (T - cs) / edge, (ce - T) / edge, fi > 0 ? (T - tStart) / fi : 1, fo > 0 ? (tEnd - T) / fo : 1));
+      const pts = [t0, cs + edge, ce - edge, ce, fi > 0 ? tStart + fi : null, fo > 0 ? tEnd - fo : null]
+        .filter((T) => T != null && T >= t0 && T <= ce).sort((x, y) => x - y);
+      fg.gain.setValueAtTime(env(t0), ctxAt(t0));
+      for (const T of pts) if (T > t0) fg.gain.linearRampToValueAtTime(env(T), ctxAt(T));
+      const off = c.a + (t0 - cs);
+      src.start(ctxAt(t0), off, b - off);
+      sources.push(src);
     }
-    if (rel >= 0) src.start(when, rel);
-    else src.start(when - rel, 0);
-    sources.push(src);
   }
   return sources;
 }
@@ -503,7 +539,7 @@ export class Engine {
     this.ensure();
     this.stop(true);
     this.disposeGraph();
-    this.graph = buildGraph(this.ctx, project, null, true);
+    this.graph = opts.light ? buildLightGraph(this.ctx, project) : buildGraph(this.ctx, project, null, true);
     const when = this.ctx.currentTime + (opts.lead || 0.06);
     this.sources = startSources(this.ctx, project, this.graph, bufferFor, when, from);
     this.startCtxTime = when; this.startPos = from; this.playing = true;
@@ -530,6 +566,7 @@ export class Engine {
   updateBus(project) { if (this.graph && this.graph.sends) this.graph.sends.update(project.bus); }
   updateGroups(project) {
     if (!this.graph) return;
+    if (this.graph.light) return;
     const G = project.groups;
     this.graph.gv.update({ fx: G.vocal.fx, vol: G.vocal.vol });
     this.graph.gb.update({ fx: G.backing.fx, vol: G.backing.vol });
@@ -561,7 +598,7 @@ export async function renderMix(project, bufferFor, sampleRate, include, onProgr
   for (const tr of project.tracks) {
     if (include && !include(tr)) continue;
     const b = bufferFor(tr);
-    if (b) end = Math.max(end, (tr.offset || 0) + b.duration);
+    if (b) for (const c of clipsOf(tr, b)) end = Math.max(end, c.at + (Math.min(c.b, b.duration) - c.a));
   }
   if (end <= 0) throw new Error('書き出す音がありません');
   const from = Math.max(0, Math.min(opts.from || 0, end - 1));

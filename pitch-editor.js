@@ -87,17 +87,17 @@ export class PitchEditor {
 
   fitView() {
     const notes = this.tr.pitch.notes || [];
-    const hop = this.an.hop, off = this.tr.offset || 0;
+    const hop = this.an.hop;
     this.pps = 110;
     this.pxSemi = 18;
     if (notes.length) {
       const ms = notes.map((n) => this.noteT(n)).sort((a, b) => a - b);
       this.top = ms[ms.length >> 1] + (this.H - RH) / this.pxSemi / 2;
-      const startT = off + notes[0].s * hop;
+      const startT = this.T(notes[0].s * hop);
       const p = this.pos > startT ? this.pos : startT;
       this.t0 = Math.max(0, p - 0.4);
     } else {
-      this.top = 72; this.t0 = off;
+      this.top = 72; this.t0 = this.T(0);
     }
   }
 
@@ -135,6 +135,9 @@ export class PitchEditor {
   get notes() { return this.tr.pitch.notes || []; }
   get hop() { return this.an.hop; }
   get off() { return this.tr.offset || 0; }
+  // audio time <-> timeline time (tracks can be split into clips)
+  T(t) { return this.api.tl ? this.api.tl(this.tr, t) : (this.tr.offset || 0) + t; }
+  A(T) { return this.api.au ? this.api.au(this.tr, T) : T - (this.tr.offset || 0); }
   noteOutStart(n) { return n.s * this.hop + (n.ts || 0); }
   noteOutEnd(n) { return n.e * this.hop + (n.te || 0); }
 
@@ -186,11 +189,11 @@ export class PitchEditor {
       g.fillStyle = '#171b22';
       g.fillRect(Math.round(this.x(t)), RH, 1, H - RH);
     }
-    const tr = this.tr, an = this.an, hop = an.hop, off = this.off;
+    const tr = this.tr, an = this.an, hop = an.hop;
     const isNote = true;
     // cuts
     tr.cuts.forEach(([a, b], i) => {
-      const x0 = this.x(off + this.inToOut(a)), x1 = this.x(off + this.inToOut(b));
+      const x0 = this.x(this.T(this.inToOut(a))), x1 = this.x(this.T(this.inToOut(b)));
       if (x1 < KW || x0 > W) return;
       g.fillStyle = i === this.selCut ? 'rgba(255,93,108,0.28)' : 'rgba(255,93,108,0.14)';
       g.fillRect(x0, RH, x1 - x0, H - RH);
@@ -213,7 +216,7 @@ export class PitchEditor {
       if (ran) {
         g.strokeStyle = hexA(ref.color, 0.7); g.lineWidth = 1.5; g.setLineDash([4, 3]);
         for (const n of ref.pitch.notes) {
-          const x0 = this.x(ref.offset + n.s * ran.hop + (n.ts || 0)), x1 = this.x(ref.offset + n.e * ran.hop + (n.te || 0));
+          const x0 = this.x(this.api.tl ? this.api.tl(ref, n.s * ran.hop + (n.ts || 0)) : ref.offset + n.s * ran.hop + (n.ts || 0)), x1 = this.x(this.api.tl ? this.api.tl(ref, n.e * ran.hop + (n.te || 0)) : ref.offset + n.e * ran.hop + (n.te || 0));
           if (x1 < KW || x0 > W) continue;
           const yc = this.y(this.noteT(n));
           g.strokeRect(x0, yc - this.pxSemi * 0.3, x1 - x0, this.pxSemi * 0.6);
@@ -224,13 +227,13 @@ export class PitchEditor {
     // blobs
     const color = tr.color || '#5fd4c4';
     this.notes.forEach((n, i) => {
-      const xs = this.x(off + this.noteOutStart(n)), xe = this.x(off + this.noteOutEnd(n));
+      const xs = this.x(this.T(this.noteOutStart(n))), xe = this.x(this.T(this.noteOutEnd(n)));
       if (xe < KW || xs > W) return;
       const tc = this.noteT(n);
       const yc = this.y(isNote ? tc : n.c);
       if (isNote && Math.abs(tc - n.c) > 0.04 && this.tool === 'pitch') {
         g.strokeStyle = 'rgba(255,255,255,0.18)'; g.setLineDash([3, 3]); g.lineWidth = 1;
-        const xo0 = this.x(off + n.s * hop), xo1 = this.x(off + n.e * hop);
+        const xo0 = this.x(this.T(n.s * hop)), xo1 = this.x(this.T(n.e * hop));
         g.strokeRect(xo0, this.y(n.c) - this.pxSemi * 0.32, xo1 - xo0, this.pxSemi * 0.64);
         g.setLineDash([]);
       }
@@ -269,8 +272,8 @@ export class PitchEditor {
       }
     });
     // pitch curves
-    const k0 = Math.max(0, Math.floor(this.outToIn(this.t0 - off) / hop) - 2);
-    const k1 = Math.min(an.f0.length, Math.ceil(this.outToIn(this.tAt(W) - off) / hop) + 2);
+    const k0 = Math.max(0, Math.floor(this.outToIn(this.A(this.t0)) / hop) - 2);
+    const k1 = Math.min(an.f0.length, Math.ceil(this.outToIn(this.A(this.tAt(W))) / hop) + 2);
     const curve = (useShift, style, width) => {
       g.strokeStyle = style; g.lineWidth = width; g.beginPath();
       let pen = false;
@@ -278,7 +281,7 @@ export class PitchEditor {
         if (!this.midi[k]) { pen = false; continue; }
         const m = this.midi[k] + (useShift && tr.pitch.enabled ? this.shift[k] : 0);
         const tt = useShift && tr.pitch.enabled ? this.inToOut((k + 0.5) * hop) : (k + 0.5) * hop;
-        const px = this.x(off + tt), py = this.y(m);
+        const px = this.x(this.T(tt)), py = this.y(m);
         if (pen) g.lineTo(px, py); else { g.moveTo(px, py); pen = true; }
       }
       g.stroke();
@@ -289,7 +292,7 @@ export class PitchEditor {
       const n = this.notes[[...this.sel][0]];
       if (n) {
         const tc = this.noteT(n);
-        const lx = Math.max(KW + 4, this.x(off + this.noteOutStart(n))), ly = this.y(isNote ? tc : n.c) - this.pxSemi * 0.6 - 4;
+        const lx = Math.max(KW + 4, this.x(this.T(this.noteOutStart(n)))), ly = this.y(isNote ? tc : n.c) - this.pxSemi * 0.6 - 4;
         const label = this.noteName(tc);
         g.font = 'bold 12px -apple-system, sans-serif';
         const w = g.measureText(label).width + 10;
@@ -361,7 +364,7 @@ export class PitchEditor {
   }
 
   hitNote(x, y) {
-    const t = this.tAt(x) - this.off;
+    const t = this.A(this.tAt(x));
     const isNote = true;
     let best = -1, bd = 1e9;
     this.notes.forEach((n, i) => {
@@ -378,7 +381,7 @@ export class PitchEditor {
   splitAt(i, tAbs) {
     const notes = this.notes;
     const n = notes[i];
-    const tin = this.outToIn(tAbs - this.off);
+    const tin = this.outToIn(this.A(tAbs));
     const k = Math.round(tin / this.hop);
     if (k - n.s < 3 || n.e - k < 3) { this.api.toast('短すぎて分割できません'); return; }
     this.pushUndo();
@@ -449,7 +452,7 @@ export class PitchEditor {
       sx = e.offsetX; sy = e.offsetY; st0 = this.t0; stop = this.top; moved = false;
       if (e.offsetX > KW && e.offsetY > RH) {
         if (this.tool === 'cut') {
-          const tin = this.outToIn(this.tAt(e.offsetX) - this.off);
+          const tin = this.outToIn(this.A(this.tAt(e.offsetX)));
           const ci = this.tr.cuts.findIndex(([a, b]) => tin >= a && tin <= b);
           mode = 'cutsel'; drag = { ci, t0: this.tAt(e.offsetX) };
           return;
@@ -473,7 +476,7 @@ export class PitchEditor {
             const n = this.notes[i];
             let zone = 'move';
             if (this.tool === 'time') {
-              const xs = this.x(this.off + this.noteOutStart(n)), xe = this.x(this.off + this.noteOutEnd(n));
+              const xs = this.x(this.T(this.noteOutStart(n))), xe = this.x(this.T(this.noteOutEnd(n)));
               const w = Math.max(1, xe - xs), r = (e.offsetX - xs) / w;
               if (r < 0.25 && w > 30) zone = 'start'; else if (r > 0.75 && w > 30) zone = 'end';
             }
@@ -640,7 +643,7 @@ export class PitchEditor {
         const [a, b] = this.pendingCut;
         p.append(h('div', { class: 'mini-btns' },
           h('button', { style: 'background:#5a2a31;color:#ffd0d5', onclick: () => {
-            const ia = this.outToIn(Math.min(a, b) - this.off), ib = this.outToIn(Math.max(a, b) - this.off);
+            const ia = this.outToIn(this.A(Math.min(a, b))), ib = this.outToIn(this.A(Math.max(a, b)));
             this.pushUndo();
             this.tr.cuts.push([Math.max(0, ia), Math.max(0, ib)]);
             this.tr.cuts = mergeRanges(this.tr.cuts);
@@ -685,7 +688,7 @@ export class PitchEditor {
           h('button', { onclick: () => this.setSel((q) => { q.t = this.noteT(q) - 0.1; }) }, '−10¢'),
           h('button', { disabled: selIdx.length !== 1, onclick: () => {
             const nn = notes[selIdx[0]];
-            const a = this.off + this.noteOutStart(nn), b = this.off + this.noteOutEnd(nn);
+            const a = this.T(this.noteOutStart(nn)), b = this.T(this.noteOutEnd(nn));
             this.splitAt(selIdx[0], this.pos > a && this.pos < b ? this.pos : (a + b) / 2);
           } }, '分割'),
           h('button', { onclick: () => this.mergeNext() }, '結合'),
