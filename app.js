@@ -182,6 +182,7 @@ function selGroup() { return project && isGroupId(selectedId) ? GROUPS.find((g) 
 // ---------------- processing ----------------
 function usesPitch(tr) { const p = tr.pitch; return p.enabled && (!!p.notes || p.tuneOn); }
 function needsProcessing(tr) {
+  if (!tr.audioId) return false;
   if (tr.kind === 'backing') return !!tr.keyShift;
   return usesPitch(tr) || tr.clean.on || tr.cuts.length > 0;
 }
@@ -261,6 +262,7 @@ function scheduleProcess(tr, delay = 220) {
   procTimers.set(tr.id, setTimeout(() => processTrack(tr), delay));
 }
 function bufferFor(tr) {
+  if (!tr.audioId) return null;
   if (needsProcessing(tr) && processed.has(tr.id)) return processed.get(tr.id);
   return buffers.get(tr.audioId) || null;
 }
@@ -393,7 +395,7 @@ function projectMenu(p) {
   });
 }
 async function deleteProjectData(p) {
-  for (const id of new Set(p.tracks.map((t) => t.audioId))) {
+  for (const id of new Set(p.tracks.map((t) => t.audioId).filter(Boolean))) {
     await Store.deleteAudio(id).catch(() => {}); await Store.deleteAnalysis(id).catch(() => {});
     for (let k = -12; k <= 12; k++) if (k) Store.deleteAudio(id + '@k' + k).catch(() => {});
   }
@@ -405,7 +407,7 @@ async function duplicateProject(p, name) {
     const np = clone(p);
     np.id = uid(); np.name = name; np.createdAt = np.updatedAt = Date.now();
     const remap = new Map();
-    for (const id of new Set(p.tracks.map((t) => t.audioId))) {
+    for (const id of new Set(p.tracks.map((t) => t.audioId).filter(Boolean))) {
       const a = await Store.getAudio(id);
       if (!a) continue;
       const nid = uid();
@@ -415,9 +417,9 @@ async function duplicateProject(p, name) {
       if (an) await Store.putAnalysis(Object.assign({}, an, { id: nid }));
     }
     const tmap = new Map();
-    np.tracks.forEach((t) => { const nid = uid(); tmap.set(t.id, nid); t.id = nid; t.audioId = remap.get(t.audioId); delete t.cleanInfo; });
+    np.tracks.forEach((t) => { const nid = uid(); tmap.set(t.id, nid); t.id = nid; t.audioId = t.audioId ? remap.get(t.audioId) : null; delete t.cleanInfo; });
     np.tracks.forEach((t) => { if (t.harmonyOf) t.harmonyOf = tmap.get(t.harmonyOf) || null; });
-    np.tracks = np.tracks.filter((t) => t.audioId);
+    np.tracks = np.tracks.filter((t) => t.audioId !== undefined);
     await Store.putProject(np);
     busy(false);
     toast(`「${name}」として保存しました`);
@@ -446,7 +448,7 @@ async function openProject(id) {
   setView('studio');
   busy('読み込み中…');
   try {
-    const ids = [...new Set(project.tracks.map((t) => t.audioId))];
+    const ids = [...new Set(project.tracks.map((t) => t.audioId).filter(Boolean))];
     for (let i = 0; i < ids.length; i++) {
       busy('読み込み中…', i / ids.length);
       const a = await Store.getAudio(ids[i]);
@@ -454,7 +456,7 @@ async function openProject(id) {
     }
   } catch (e) { toast('音源の読み込みに失敗しました'); }
   busy(false);
-  project.tracks = project.tracks.filter((t) => buffers.has(t.audioId));
+  project.tracks = project.tracks.filter((t) => !t.audioId || buffers.has(t.audioId));
   engine.seek(0);
   TL.scrollX = 0; TL.scrollY = 0;
   setSaveState('saved');
@@ -548,13 +550,12 @@ async function importAudio(file, multi) {
   return 'ok';
 }
 async function autoLevel(tr, silent) {
-  const buf = buffers.get(tr.audioId);
+  const buf = tr.audioId && buffers.get(tr.audioId);
   if (!buf) return;
   try {
-    const ch = [buf.getChannelData(0).slice()];
-    const r = await rpc({ type: 'loudness', chs: ch, sr: buf.sampleRate }, null, [ch[0].buffer]);
-    if (!isFinite(r.lufs) || r.lufs <= -69) return;
-    tr.clipGain = Math.max(-20, Math.min(24, Math.round((-20 - r.lufs) * 2) / 2));
+    const lufs = DSP.loudness([buf.getChannelData(0)], buf.sampleRate);
+    if (!isFinite(lufs) || lufs <= -69) return;
+    tr.clipGain = Math.max(-20, Math.min(24, Math.round((-20 - lufs) * 2) / 2));
     engine.updateTrack(project, tr);
     saveProject();
     if (!silent) toast(`入力ゲインを ${fmtDb(tr.clipGain)} にしました`);
@@ -572,7 +573,7 @@ async function autoBpm(tr, silent) {
 
 // ---------------- track ops ----------------
 function dropAudioIfUnused(audioId) {
-  if (project.tracks.some((t) => t.audioId === audioId)) return;
+  if (!audioId || project.tracks.some((t) => t.audioId === audioId)) return;
   Store.deleteAudio(audioId).catch(() => {});
   Store.deleteAnalysis(audioId).catch(() => {});
   for (let k = -12; k <= 12; k++) if (k) Store.deleteAudio(audioId + '@k' + k).catch(() => {});
@@ -610,7 +611,7 @@ async function pasteTrack() {
   if (project.tracks.length >= MAX_TRACKS) { toast(`トラックは最大${MAX_TRACKS}本までです`); return; }
   const c = clone(trackClip.track);
   c.id = uid(); c.name = c.name + ' (コピー)'; c.solo = false;
-  if (trackClip.projectId !== project.id) {
+  if (trackClip.projectId !== project.id && c.audioId) {
     busy('貼り付け中…');
     const a = await Store.getAudio(c.audioId).catch(() => null);
     if (!a) { busy(false); toast('元の音源が見つかりませんでした'); return; }
@@ -622,7 +623,7 @@ async function pasteTrack() {
     buffers.set(nid, toAudioBuffer(a));
     delete c.harmonyOf;
     busy(false);
-  } else if (!buffers.has(c.audioId)) { toast('元の音源が見つかりませんでした'); return; }
+  } else if (c.audioId && !buffers.has(c.audioId)) { toast('元の音源が見つかりませんでした'); return; }
   if (c.kind !== 'backing' && project.tracks.some((t) => t.color === c.color)) c.color = nextColor();
   migrateTrack(c);
   project.tracks.push(c);
@@ -719,8 +720,13 @@ function drawTimeline() {
     if (tr.id === selectedId) { g.fillStyle = 'rgba(255,255,255,0.035)'; g.fillRect(0, y, TL.w, LANE_H); }
     g.fillStyle = '#1d2129'; g.fillRect(0, y + LANE_H - 1, TL.w, 1);
     const buf = bufferFor(tr);
-    if (!buf) return;
-    drawClip(g, tr, buf, peaksOf(buf === processed.get(tr.id) ? 'p:' + tr.id : 'a:' + tr.audioId, buf), y);
+    if (buf) drawClip(g, tr, buf, peaksOf(buf === processed.get(tr.id) ? 'p:' + tr.id : 'a:' + tr.audioId, buf), y);
+    else if (!tr.audioId && !(rec.active && rec.target === tr)) {
+      g.strokeStyle = tr.color + '88'; g.setLineDash([4, 4]); g.lineWidth = 1;
+      roundRect(g, 8, y + 6, TL.w - 16, LANE_H - 13, 7); g.stroke(); g.setLineDash([]);
+      g.fillStyle = '#8d95a5'; g.font = '12px -apple-system, sans-serif';
+      g.fillText(tr.id === selectedId ? '● を押すとここに録音します' : 'タップして選択 → ● で録音', 18, y + LANE_H / 2 + 4);
+    }
     if (rec.active && rec.punch && rec.target === tr) drawRecPeaks(g, y);
   });
   if (rec.active && !rec.punch) {
@@ -791,7 +797,8 @@ function drawClip(g, tr, buf, peaks, y) {
   g.globalAlpha = 1;
 }
 function roundRect(g, x, y, w, hh, r) {
-  r = Math.min(r, w / 2, hh / 2);
+  w = Math.max(0, w); hh = Math.max(0, hh);
+  r = Math.max(0, Math.min(r, w / 2, hh / 2));
   g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + hh, r); g.arcTo(x + w, y + hh, x, y + hh, r); g.arcTo(x, y + hh, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
 }
 function renderLaneHeads() {
@@ -818,7 +825,7 @@ function recTargetLabel() {
   const t = recTargetTrack();
   if (settings.recTarget === 'newVocal') return '新規メイン';
   if (settings.recTarget === 'newHarmony') return '新規ハモリ';
-  return t ? `${t.name}に続けて` : '新規メイン';
+  return t ? (t.audioId ? `${t.name}に続けて` : `${t.name}に録音`) : '新規メイン';
 }
 function refreshHead() {
   $('btnKey').textContent = `${keyLabel(project.key)} · ${project.bus.bpm}`;
@@ -914,7 +921,19 @@ function togglePlay(filter) {
   updateTransportUI();
 }
 function stopAll() { if (rec.active) stopRecording(); engine.stop(); updateTransportUI(); }
+// keep the screen on while playing / recording (iPhone stops the mic when the screen locks)
+let wakeLock = null;
+async function keepAwake() {
+  const want = engine.playing || rec.active;
+  try {
+    if (want && !wakeLock && navigator.wakeLock && !document.hidden) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!want && wakeLock) { const w = wakeLock; wakeLock = null; await w.release(); }
+  } catch (e) { wakeLock = null; }
+}
 function updateTransportUI() {
+  keepAwake();
   $('btnPlay').classList.toggle('on', engine.playing);
   $('btnPlay').textContent = engine.playing ? '❚❚' : '▶';
   $('btnRec').classList.toggle('on', rec.active);
@@ -983,9 +1002,12 @@ bgAudio.addEventListener('play', () => { $('bgToggle').textContent = '❚❚'; }
 const rec = { active: false, chunks: [], len: 0, peaks: [], firstFrame: -1, startPos: 0, punchPos: 0, playWhen: 0, lastPeak: 0, onDone: null, target: null, punch: false, kind: 'vocal' };
 let workletReady = false;
 function recTargetTrack() {
-  if (settings.recTarget !== 'auto') return null;
+  if (settings.recTarget !== 'auto' || !project) return null;
   const t = selTrack();
-  return t && isVox(t) ? t : null;
+  if (t && isVox(t)) return t;
+  // nothing (or the backing) selected: continue on the track recorded last
+  const last = project.tracks.find((x) => x.id === project.lastRecId && isVox(x));
+  return last || null;
 }
 function latencySec() {
   if (settings.latencyMode === 'bt') return settings.btMs / 1000;
@@ -1017,7 +1039,7 @@ async function startRecording() {
   node.port.onmessage = (e) => {
     const d = e.data;
     if (d.firstFrame != null) rec.firstFrame = d.firstFrame;
-    if (d.pcm) { rec.chunks.push(d.pcm); rec.len += d.pcm.length; rec.peaks.push(d.peak); rec.lastPeak = d.peak; }
+    if (d.pcm) { rec.chunks.push(d.pcm); rec.len += d.pcm.length; rec.peaks.push(d.peak); rec.lastPeak = d.peak; rec.lastChunkAt = performance.now(); }
     if (d.done && rec.onDone) rec.onDone();
   };
   node.port.postMessage('start');
@@ -1026,7 +1048,9 @@ async function startRecording() {
   rec.active = true;
   // the target track plays during the pre-roll and stops at the punch point
   let playProj = project, bf = bufferFor;
-  if (target) {
+  if (target && !bufferFor(target)) {
+    playProj = Object.assign({}, project, { tracks: project.tracks.filter((t) => t !== target) });
+  } else if (target) {
     const full = bufferFor(target);
     const keep = Math.max(0, Math.min(full.length, Math.round((rec.punchPos - target.offset) * full.sampleRate)));
     const proxy = Object.assign({}, target, { id: target.id + ':pre', fade: { in: target.fade.in, out: 0.01 } });
@@ -1042,7 +1066,8 @@ async function startRecording() {
   updateTransportUI(); refreshStudio();
   if (!target) TL.scrollY = Math.max(0, (project.tracks.length + 1) * LANE_H - TL.h);
   if (project.memo && project.memo.trim() && $('lyricsPane').classList.contains('hidden')) { $('lyricsPane').classList.remove('hidden'); refreshHead(); }
-  toast(target ? `「${target.name}」の${fmtTime(rec.punchPos)}から上書き録音します` : '録音中…', 1800);
+  toast(target ? (target.audioId ? `「${target.name}」の${fmtTime(rec.punchPos)}から続けて録音` : `「${target.name}」に録音中`) : '録音中…', 1800);
+  keepAwake();
 }
 
 async function stopRecording() {
@@ -1065,7 +1090,13 @@ async function stopRecording() {
   let offset = rec.startPos + (first - rec.playWhen) - latencySec();
   if (offset < rec.punchPos) { data = data.subarray(Math.round((rec.punchPos - offset) * sr)); offset = rec.punchPos; }
   if (data.length < sr * 0.3) { toast('録音が短すぎたので破棄しました'); refreshStudio(); return; }
-  if (rec.punch && rec.target && project.tracks.includes(rec.target)) { await punchIn(rec.target, data, sr, offset); return; }
+  keepAwake();
+  if (rec.punch && rec.target && project.tracks.includes(rec.target)) {
+    project.lastRecId = rec.target.id;
+    if (rec.target.audioId) await punchIn(rec.target, data, sr, offset);
+    else await recordIntoEmpty(rec.target, data, sr, offset);
+    return;
+  }
   const audioId = uid();
   const channels = [data.slice()];
   try { await Store.putAudio({ id: audioId, sr, channels }); } catch (e) { infoModal('保存できませんでした', '端末の空き容量が足りない可能性があります。'); refreshStudio(); return; }
@@ -1076,10 +1107,26 @@ async function stopRecording() {
   tr.offset = offset;
   project.tracks.push(tr);
   selectedId = tr.id;
+  project.lastRecId = tr.id;
+  settings.recTarget = 'auto'; saveSettings();
   engine.seek(rec.punchPos);
   saveProject(); refreshStudio();
   autoLevel(tr, true);
-  toast('録音しました（このトラックを選んだまま●で続きから録れます）', 3200);
+  toast('録音しました。もう一度 ● で、このトラックに続けて録音できます', 3200);
+}
+
+async function recordIntoEmpty(tr, data, sr, offset) {
+  const audioId = uid();
+  const channels = [data.slice()];
+  try { await Store.putAudio({ id: audioId, sr, channels }); } catch (e) { infoModal('保存できませんでした', '端末の空き容量が足りない可能性があります。'); refreshStudio(); return; }
+  buffers.set(audioId, toAudioBuffer({ sr, channels }));
+  tr.audioId = audioId;
+  tr.offset = offset;
+  selectedId = tr.id;
+  engine.seek(rec.punchPos);
+  saveProject(); refreshStudio();
+  autoLevel(tr, true);
+  toast('録音しました。もう一度 ● で続けて録音できます', 3000);
 }
 
 // replace part of an existing track with the new take
@@ -1162,6 +1209,7 @@ function renderSheet() {
   body.innerHTML = '';
   grEl = null;
   if (gr) (sheetTab === 'gfx' ? buildGroupFxTab : buildBalanceTab)(body, gr);
+  else if (!tr.audioId && ['clean', 'pitch', 'harm', 'key'].includes(sheetTab)) body.append(h('p', { class: 'note', style: 'padding:16px 4px' }, 'まだ音声がありません。このトラックを選んだまま ● で録音してください。'));
   else ({ mix: buildMixTab, fx: buildFxTab, clean: buildCleanTab, pitch: buildPitchTab, harm: buildHarmTab, key: buildKeyTab })[sheetTab](body, tr);
   body.scrollTop = st;
 }
@@ -1364,14 +1412,23 @@ function buildBalanceTab(body) {
     slider({ label: '音源', min: -24, max: 12, step: 0.5, value: G.backing.vol, fmt: fmtDb, oninput: (v) => { G.backing.vol = v; G.balanceTpl = null; changed(); } }),
     slider({ label: 'マスター', min: -12, max: 6, step: 0.5, value: G.master.vol, fmt: fmtDb, oninput: (v) => { G.master.vol = v; changed(); } })));
 }
-async function measureGroup(include) {
+async function measureGroup(include, from) {
   const proj = Object.assign({}, project, { groups: clone(project.groups) });
   proj.groups.vocal.vol = 0; proj.groups.backing.vol = 0; proj.groups.master.limiter = false;
-  const sr = 22050;
-  const out = await renderMix(proj, bufferFor, sr, include, null, { noTail: true });
-  const L = out.L.slice(), R = out.R.slice();
-  const r = await rpc({ type: 'loudness', chs: [L, R], sr }, null, [L.buffer, R.buffer]);
-  return r.lufs;
+  const sr = 16000;
+  const out = await renderMix(proj, bufferFor, sr, include, null, { noTail: true, from, maxSec: 60 });
+  return DSP.loudness([out.L, out.R], sr);
+}
+function vocalWindowStart() {
+  // start of the busiest vocal part: first vocal note, a bit into the song
+  let st = 1e9;
+  for (const t of project.tracks) {
+    if (t.kind !== 'vocal' || !t.audioId) continue;
+    const an = analyses.get(t.audioId);
+    const first = t.pitch.notes && t.pitch.notes.length && an ? t.pitch.notes[0].s * an.hop : 0;
+    st = Math.min(st, t.offset + first);
+  }
+  return st < 1e9 ? Math.max(0, st) : 0;
 }
 async function autoBalance(targetLU, quiet) {
   const hasV = project.tracks.some((t) => isVox(t) && !t.mute), hasB = project.tracks.some((t) => t.kind === 'backing' && !t.mute);
@@ -1379,9 +1436,10 @@ async function autoBalance(targetLU, quiet) {
   for (const tr of project.tracks) if (needsProcessing(tr) && !processed.has(tr.id)) { busy('準備中…'); await processTrack(tr); }
   busy('バランスを測っています…', 0.2);
   try {
-    const lv = await measureGroup((t) => isVox(t) && !t.mute);
+    const from = vocalWindowStart();
+    const lv = await measureGroup((t) => isVox(t) && !t.mute, from);
     busy('バランスを測っています…', 0.6);
-    const lb = await measureGroup((t) => t.kind === 'backing' && !t.mute);
+    const lb = await measureGroup((t) => t.kind === 'backing' && !t.mute, from);
     const G = project.groups;
     G.backing.vol = 0;
     G.vocal.vol = Math.max(-15, Math.min(15, Math.round((targetLU - (lv - lb)) * 2) / 2));
@@ -1467,7 +1525,7 @@ function buildPitchTab(body, tr) {
   body.append(section('なめらかさ', false, slider({ label: 'つながり', min: 0, max: 150, step: 5, value: p.transitionMs, fmt: (v) => v + ' ms', oninput: (v) => { p.transitionMs = v; }, onchange: () => { saveProject(); processTrack(tr); } })));
 }
 async function ensureKey() { if (project.key.auto && !project.key.detected) { await detectKey(true); refreshHead(); } }
-export async function autoCorrect(tr, center, drift, onlyIdx) {
+export async function autoCorrect(tr, center, drift, onlyIdx, noProcess) {
   if (!tr.pitch.notes) await ensureTrackNotes(tr);
   await ensureKey();
   tr.pitch.notes.forEach((n, i) => {
@@ -1479,7 +1537,7 @@ export async function autoCorrect(tr, center, drift, onlyIdx) {
   });
   tr.pitch.enabled = true;
   saveProject();
-  scheduleProcess(tr, 10);
+  if (!noProcess) scheduleProcess(tr, 10);
 }
 function resetPitch(tr) {
   (tr.pitch.notes || []).forEach((n) => Object.assign(n, { t: n.c, flat: 0, vib: 1, gain: 0, form: 0, mute: false, ts: 0, te: 0 }));
@@ -1703,7 +1761,7 @@ const AUTO_MIX = {
   edm: { name: 'ボカロ・EDM', desc: 'ケロケロ系オートチューン', main: 'vtuber', harm: 'harm_wide', back: 'b_bright', gv: 'gv_front', gb: 'gb_punch', gm: 'gm_loud', reverb: 'plate', delay: '1/16', fb: 0.35, pp: true, center: 1, drift: 0.5, tune: { speedMs: 0, strength: 1 }, lu: 0.5, harmony: false },
 };
 function autoMixSheet() {
-  if (!project.tracks.some((t) => t.kind === 'vocal')) { toast('メインボーカルのトラックが必要です'); return; }
+  if (!project.tracks.some((t) => t.kind === 'vocal' && t.audioId)) { toast('メインボーカルの音声が必要です'); return; }
   const st = { tpl: project.lastAutoMix || 'vtuber', clean: true, pitch: true, harm: null };
   openModal((c, close) => {
     const render = () => {
@@ -1730,13 +1788,14 @@ async function runAutoMix(key, opt) {
   try {
     const backing = project.tracks.find((t) => t.kind === 'backing');
     if (backing) { busy('テンポを判定中…', 0.02); const b = await autoBpm(backing, true); if (b) done.push(`テンポ ${b} BPM`); }
-    const mains = project.tracks.filter((t) => t.kind === 'vocal');
+    const mains = project.tracks.filter((t) => t.kind === 'vocal' && t.audioId);
     for (let i = 0; i < mains.length; i++) {
       busy(`ボーカルを解析中…（${i + 1}/${mains.length}）`, 0.05 + 0.25 * i / mains.length);
       await ensureTrackNotes(mains[i], (p) => busy(`ボーカルを解析中…（${i + 1}/${mains.length}）`, 0.05 + 0.25 * (i + p) / mains.length));
     }
     if (project.key.auto) { busy('キーを判定中…', 0.32); await detectKey(true); refreshHead(); done.push(`キー ${keyLabel(project.key)}`); }
     for (const tr of project.tracks) {
+      if (!tr.audioId) continue;
       if (tr.kind === 'backing') { tr.fx = fxFromPreset(tpl.back); tr.vol = 0; continue; }
       tr.fx = fxFromPreset(tr.kind === 'vocal' ? tpl.main : tpl.harm);
       if (opt.clean && !tr.harmonyOf) { tr.clean.on = true; tr.clean.auto = true; }
@@ -1744,7 +1803,7 @@ async function runAutoMix(key, opt) {
         tr.vol = 0;
         if (opt.pitch) {
           if (tpl.tune) { tr.pitch.tuneOn = true; tr.pitch.tune = clone(tpl.tune); tr.pitch.enabled = true; }
-          else { tr.pitch.tuneOn = false; await autoCorrect(tr, tpl.center, tpl.drift); }
+          else { tr.pitch.tuneOn = false; await autoCorrect(tr, tpl.center, tpl.drift, null, true); }
         }
       }
       await autoLevel(tr, true);
@@ -1764,8 +1823,9 @@ async function runAutoMix(key, opt) {
     done.push('エフェクト');
     for (let i = 0; i < project.tracks.length; i++) {
       const tr = project.tracks[i];
-      busy('音声を処理中…', 0.45 + 0.35 * i / project.tracks.length);
-      await processTrack(tr);
+      if (!needsProcessing(tr)) continue;
+      busy(`音声を処理中…（${i + 1}/${project.tracks.length}）`, 0.45 + 0.35 * i / project.tracks.length);
+      await processTrack(tr, (p) => busy(`音声を処理中…（${i + 1}/${project.tracks.length}）`, 0.45 + 0.35 * (i + p) / project.tracks.length));
     }
     await autoBalance(tpl.lu, true);
     G.balanceTpl = null;
@@ -1815,11 +1875,14 @@ async function doExport(st) {
   try {
     const sr = engine.ensure().sampleRate;
     const out = await renderMix(project, bufferFor, sr, include, (p) => busy('書き出し中…', p * 0.8));
-    let L = out.L.slice(), R = out.R.slice();
+    const L = out.L, R = out.R;
     const target = st.final === 'stream' ? -14 : st.final === 'loud' ? -10 : null;
     busy('音量を仕上げ中…', 0.85);
-    const fin = await rpc({ type: 'finalize', chs: [L, R], sr, target, ceil: -1 }, null, [L.buffer, R.buffer]);
-    [L, R] = fin.chs;
+    await new Promise((r) => setTimeout(r, 30));
+    const fin = { before: null };
+    let gainDb = 0;
+    if (target != null) { fin.before = DSP.loudness([L, R], sr); gainDb = Math.max(-20, Math.min(24, target - fin.before)); }
+    DSP.limit([L, R], sr, -1, gainDb);
     busy('ファイルを作成中…', 0.95);
     await new Promise((r) => setTimeout(r, 30));
     const blob = encodeWav([L, R], sr, st.bits);
@@ -1852,7 +1915,7 @@ async function exportBackup(p) {
   busy('バックアップを作成中…');
   try {
     const audios = [], parts = [];
-    for (const id of new Set(p.tracks.map((t) => t.audioId))) {
+    for (const id of new Set(p.tracks.map((t) => t.audioId).filter(Boolean))) {
       const a = await Store.getAudio(id);
       if (!a) continue;
       audios.push({ id, sr: a.sr, nch: a.channels.length, len: a.channels[0].length });
@@ -1891,9 +1954,9 @@ async function importBackup(file) {
     const p = meta.project;
     p.id = uid(); p.updatedAt = Date.now();
     const tmap = new Map();
-    p.tracks.forEach((t) => { const nid = uid(); tmap.set(t.id, nid); t.id = nid; t.audioId = remap.get(t.audioId); });
+    p.tracks.forEach((t) => { const nid = uid(); tmap.set(t.id, nid); t.id = nid; t.audioId = t.audioId ? remap.get(t.audioId) : null; });
     p.tracks.forEach((t) => { if (t.harmonyOf) t.harmonyOf = tmap.get(t.harmonyOf) || null; });
-    p.tracks = p.tracks.filter((t) => t.audioId);
+    p.tracks = p.tracks.filter((t) => t.audioId !== undefined);
     await Store.putProject(p);
     busy(false); toast('読み込みました'); showHome();
   } catch (e) { busy(false); infoModal('読み込めませんでした', String(e.message || e)); }
@@ -1918,8 +1981,8 @@ function recordSettings() {
       c.innerHTML = '';
       c.append(h('h3', {}, '録音の設定'),
         h('div', { class: 'lbl-line' }, '録音先'),
-        chips([['auto', '選択中のトラックに続けて'], ['newVocal', '新規メイン'], ['newHarmony', '新規ハモリ']], settings.recTarget, (v) => { settings.recTarget = v; saveSettings(); refreshHead(); render(); }),
-        h('p', { class: 'note' }, '「選択中のトラックに続けて」：ボーカルを選んだまま●を押すと、再生位置からそのトラックに上書きで録音します（新しいトラックは増えません）。'),
+        chips([['auto', '続けて録音（おすすめ）'], ['newVocal', '次は新規メイン'], ['newHarmony', '次は新規ハモリ']], settings.recTarget, (v) => { settings.recTarget = v; saveSettings(); refreshHead(); render(); }),
+        h('p', { class: 'note' }, '「続けて録音」：選んでいるボーカル（選んでいなければ最後に録ったトラック）に、再生位置から録音します。トラックは増えません。「次は新規」は1回録ると自動で「続けて録音」に戻ります。'),
         h('div', { class: 'lbl-line' }, 'プリロール（録音前に戻って流す秒数）'),
         chips([[0, 'なし'], [2, '2秒'], [4, '4秒']], settings.preroll, (v) => { settings.preroll = v; saveSettings(); render(); }),
         h('div', { class: 'lbl-line' }, 'イヤホン（ズレ補正）'),
@@ -1938,12 +2001,24 @@ function addTrackMenu() {
     const ch = (ic, t, sub, fn, dis) => h('button', { class: 'choice', style: dis ? 'opacity:.4' : '', onclick: () => { if (dis) { toast(`トラックは最大${MAX_TRACKS}本までです`); return; } close(); fn(); } }, h('span', { class: 'ic' }, ic), h('div', {}, h('b', {}, t), h('small', {}, sub)));
     c.append(h('h3', {}, 'トラックを追加'),
       ch('📁', '音源を読み込む', 'WAV・MP3・M4A・動画など（複数可）', () => $('fileAudio').click(), full),
-      ch('●', '新しいメインを録音', '', () => { settings.recTarget = 'newVocal'; saveSettings(); refreshHead(); startRecording(); }, full),
-      ch('●', '新しいハモリを録音', '', () => { settings.recTarget = 'newHarmony'; saveSettings(); refreshHead(); startRecording(); }, full),
+      ch('🎤', '空のメイントラック', '追加して選択します（録音は ● を押したとき）', () => addEmptyTrack('vocal'), full),
+      ch('🎶', '空のハモリトラック', '追加して選択します（録音は ● を押したとき）', () => addEmptyTrack('harmony'), full),
       trackClip ? ch('📋', 'コピーしたトラックを貼り付け', trackClip.track.name, pasteTrack, full) : null,
       h('div', { class: 'actions' }, h('button', { class: 'big-btn ghost', onclick: close }, 'キャンセル')));
   });
 }
+function addEmptyTrack(kind) {
+  const n = project.tracks.filter((t) => t.kind === kind && !t.harmonyOf).length + 1;
+  const tr = makeTrack(kind, null, (kind === 'harmony' ? 'ハモリ ' : 'ボーカル ') + n);
+  tr.offset = engine.position;
+  project.tracks.push(tr);
+  selectedId = tr.id;
+  settings.recTarget = 'auto'; saveSettings();
+  saveProject(); refreshStudio();
+  TL.scrollY = Math.max(0, project.tracks.length * LANE_H - TL.h + 20); clampScroll(); renderLaneHeads(); drawTimeline();
+  toast('トラックを追加しました。録音位置を決めて ● で録音できます', 3000);
+}
+
 function aboutModal() {
   const standalone = window.navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
   infoModal('使い方・安全性', `
@@ -2036,7 +2111,16 @@ $('fileBackup').addEventListener('change', (e) => { const f = e.target.files[0];
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('dblclick', (e) => e.preventDefault(), { passive: false });
 document.addEventListener('pointerdown', () => { if (engine.ctx && engine.ctx.state !== 'running') engine.ctx.resume().catch(() => {}); }, true);
-document.addEventListener('visibilitychange', () => { if (document.hidden) { if (rec.active) stopRecording(); flushSave(); } });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { flushSave(); if (rec.active) rec.hiddenAt = performance.now(); return; }
+  keepAwake();
+  // back from the background: if iOS paused the mic, keep what was recorded
+  if (rec.active && rec.hiddenAt) {
+    const stalled = performance.now() - (rec.lastChunkAt || 0) > 1500 || (engine.ctx && engine.ctx.state !== 'running');
+    rec.hiddenAt = 0;
+    if (stalled) { stopRecording(); toast('画面ロック中にiPhoneが録音を止めたため、そこまでを保存しました', 4000); }
+  }
+});
 window.addEventListener('pagehide', () => { flushSave(); });
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 requestAnimationFrame(loop);

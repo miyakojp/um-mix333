@@ -995,54 +995,60 @@
   };
 
   // ---------- loudness (ITU-R BS.1770) and limiter ----------
+  // streaming: no full-length copies (keeps memory low on phones)
   DSP.loudness = function (chs, sr) {
     const s1 = biquadCoefs('hs', 1681.974450955533, sr, 0.7071752369554196, 3.999843853973347);
     const s2 = biquadCoefs('hp', 38.13547087602444, sr, 0.5003270373238773);
-    const kw = chs.map((c) => biquadRun(biquadRun(c, s1), s2));
-    const B = Math.round(0.4 * sr), step = Math.round(0.1 * sr);
-    const blocks = [];
-    for (let st = 0; st + B <= kw[0].length; st += step) {
-      let z = 0;
-      for (const c of kw) { let e = 0; for (let i = st; i < st + B; i++) e += c[i] * c[i]; z += e / B; }
-      blocks.push(z);
+    const step = Math.round(0.1 * sr), n = chs[0].length, nSub = Math.floor(n / step);
+    if (nSub < 4) return -70;
+    const sub = new Float64Array(nSub);
+    for (const c of chs) {
+      let a1 = 0, a2 = 0, b1 = 0, b2 = 0, c1 = 0, c2 = 0, d1 = 0, d2 = 0, acc = 0, k = 0, cnt = 0;
+      for (let i = 0; i < nSub * step; i++) {
+        const x = c[i];
+        const y = s1[0] * x + s1[1] * a1 + s1[2] * a2 - s1[3] * b1 - s1[4] * b2;
+        a2 = a1; a1 = x; b2 = b1; b1 = y;
+        const z = s2[0] * y + s2[1] * c1 + s2[2] * c2 - s2[3] * d1 - s2[4] * d2;
+        c2 = c1; c1 = y; d2 = d1; d1 = z;
+        acc += z * z;
+        if (++cnt === step) { sub[k++] += acc / step; acc = 0; cnt = 0; }
+      }
     }
+    const blocks = [];
+    for (let j = 0; j + 4 <= nSub; j++) blocks.push((sub[j] + sub[j + 1] + sub[j + 2] + sub[j + 3]) / 4);
     const lk = (z) => -0.691 + 10 * Math.log10(z + 1e-20);
-    let g1 = blocks.filter((z) => lk(z) > -70);
+    const g1 = blocks.filter((z) => lk(z) > -70);
     if (!g1.length) return -70;
-    const mean1 = g1.reduce((a, b) => a + b, 0) / g1.length;
-    const rel = lk(mean1) - 10;
+    const rel = lk(g1.reduce((x, y) => x + y, 0) / g1.length) - 10;
     const g2 = g1.filter((z) => lk(z) > rel);
-    return lk(g2.reduce((a, b) => a + b, 0) / Math.max(1, g2.length));
+    return lk(g2.reduce((x, y) => x + y, 0) / Math.max(1, g2.length));
   };
 
+  // streaming look-ahead limiter, in place, small ring buffers only
   DSP.limit = function (chs, sr, ceilDb, gainDb) {
     const ceil = Math.pow(10, ceilDb / 20), pre = Math.pow(10, (gainDb || 0) / 20);
-    const n = chs[0].length, L = Math.max(1, Math.round(0.005 * sr));
-    const req = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      let pk = 0;
-      for (const c of chs) { const v = Math.abs(c[i] * pre); if (v > pk) pk = v; }
-      req[i] = pk > ceil ? ceil / pk : 1;
-    }
-    // sliding min over lookahead window
-    const mn = new Float32Array(n);
-    const dq = new Int32Array(n); let h0 = 0, t0 = 0;
-    for (let i = n - 1; i >= 0; i--) {
-      while (t0 > h0 && req[dq[t0 - 1]] >= req[i]) t0--;
-      dq[t0++] = i;
-      while (dq[h0] > i + L) h0++;
-      mn[i] = req[dq[h0]];
-    }
-    // smooth attack (moving average over L) + release
-    const cs = new Float64Array(n + 1);
-    for (let i = 0; i < n; i++) cs[i + 1] = cs[i] + mn[i];
+    const n = chs[0].length, L = Math.max(2, Math.round(0.005 * sr)), cap = L + 4;
+    const qi = new Int32Array(cap), qv = new Float32Array(cap);
+    let head = 0, size = 0, pushed = 0;
+    const ring = new Float32Array(L);
+    let sum = 0;
     const rel = Math.exp(-1 / (0.08 * sr));
     let g = 1;
+    const reqAt = (j) => { let pk = 0; for (const c of chs) { const v = Math.abs(c[j] * pre); if (v > pk) pk = v; } return pk > ceil ? ceil / pk : 1; };
     for (let i = 0; i < n; i++) {
-      const lo = Math.max(0, i - L + 1);
-      const avg = (cs[i + 1] - cs[lo]) / (i + 1 - lo);
-      const target = Math.min(avg, mn[i]);
-      g = target < g ? target : target + (g - target) * rel;
+      const lim = Math.min(n - 1, i + L);
+      while (pushed <= lim) {
+        const v = reqAt(pushed);
+        while (size > 0 && qv[(head + size - 1) % cap] >= v) size--;
+        qi[(head + size) % cap] = pushed; qv[(head + size) % cap] = v; size++;
+        pushed++;
+      }
+      while (size > 0 && qi[head] < i) { head = (head + 1) % cap; size--; }
+      const m = size ? qv[head] : 1;
+      const r = i % L;
+      sum += m - ring[r]; ring[r] = m;
+      const avg = sum / Math.min(i + 1, L);
+      g = avg < g ? avg : avg + (g - avg) * rel;
       for (const c of chs) { let v = c[i] * pre * g; if (v > ceil) v = ceil; else if (v < -ceil) v = -ceil; c[i] = v; }
     }
     return chs;

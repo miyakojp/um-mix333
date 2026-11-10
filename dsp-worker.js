@@ -42,7 +42,7 @@ function cleaned(e, c, prog) {
   }
   const res = { key, y, info };
   e.cleanCache.set(key, res);
-  while (e.cleanCache.size > 3) e.cleanCache.delete(e.cleanCache.keys().next().value);
+  while (e.cleanCache.size > 1) e.cleanCache.delete(e.cleanCache.keys().next().value);
   return res;
 }
 

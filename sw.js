@@ -1,5 +1,5 @@
 // UtaMix service worker: caches the app itself so it works offline. It never sends your data anywhere.
-const VERSION = 'utamix-v3';
+const VERSION = 'utamix-v4';
 const FILES = [
   './', 'index.html', 'manifest.webmanifest', 'app.css',
   'app.js', 'audio-engine.js', 'storage.js', 'pitch-editor.js',

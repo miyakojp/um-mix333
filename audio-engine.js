@@ -126,7 +126,7 @@ function makeIR(ctx, type) {
   const t = REVERB_TYPES[type] || REVERB_TYPES.plate;
   const sr = ctx.sampleRate;
   const pre = Math.round(sr * t.pre / 1000);
-  const len = pre + Math.round(sr * t.decay * 1.2);
+  const len = pre + Math.round(sr * t.decay * 0.85);
   const buf = ctx.createBuffer(2, len, sr);
   let seed = 12345 + type.length * 777;
   const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296 * 2 - 1; };
@@ -189,6 +189,7 @@ class Strip {
     this.dsEnv = bq('lowpass', 40, 0.5);
     this.dsMap = ctx.createWaveShaper();
     this.dsSum = g();
+    this.preComp = g();
     this.comp = ctx.createDynamicsCompressor();
     this.makeup = g();
     this.satDry = g(); this.satWet = g();
@@ -199,9 +200,9 @@ class Strip {
     this.colHp = bq('highpass', 100, 0.7); this.colLp = bq('lowpass', 8000, 0.7);
     this.colShape = ctx.createWaveShaper();
     this.ring = g();
-    this.ringOsc = ctx.createOscillator(); this.ringOsc.frequency.value = 55;
+    this.ringOsc = null;
     this.ringDepth = g(); this.ringDepth.gain.value = 0;
-    this.ringOsc.connect(this.ringDepth); this.ringDepth.connect(this.ring.gain); this.ringOsc.start();
+    this.ringDepth.connect(this.ring.gain);
     this.fader = g();
     this.mute = g();
     this.pan = ctx.createStereoPanner();
@@ -213,56 +214,97 @@ class Strip {
     this.dbPanL = ctx.createStereoPanner(); this.dbPanL.pan.value = -0.8;
     this.dbPanR = ctx.createStereoPanner(); this.dbPanR.pan.value = 0.8;
     this.dbGain = g();
-    this.oscs = [this.ringOsc];
-    [[this.dbL, 0.31], [this.dbR, 0.43]].forEach(([dl, rate]) => {
-      const o = ctx.createOscillator(); o.frequency.value = rate;
-      const og = g(); og.gain.value = 0.0015;
-      o.connect(og); og.connect(dl.delayTime); o.start();
-      this.oscs.push(o);
-    });
+    this.oscs = [];
+    this.dblOscOn = false;
     this.revSend = g(); this.dlySend = g();
 
-    let n = this.input;
-    n.connect(this.hpf); n = this.hpf;
-    for (const b of this.eq) { n.connect(b); n = b; }
-    n.connect(this.dsLo1); this.dsLo1.connect(this.dsLo2); this.dsLo2.connect(this.dsSum);
-    n.connect(this.dsHi1); this.dsHi1.connect(this.dsHi2); this.dsHi2.connect(this.dsHiGain); this.dsHiGain.connect(this.dsSum);
+    this.eqOut = g();
+    this.eqChain = null;
+    // de-esser split (switched in only when used)
+    this.dsLo1.connect(this.dsLo2); this.dsLo2.connect(this.dsSum);
+    this.dsHi1.connect(this.dsHi2); this.dsHi2.connect(this.dsHiGain); this.dsHiGain.connect(this.dsSum);
     this.dsHi2.connect(this.dsAbs); this.dsAbs.connect(this.dsEnv); this.dsEnv.connect(this.dsMap); this.dsMap.connect(this.dsHiGain.gain);
-    this.dsSum.connect(this.comp); this.comp.connect(this.makeup);
-    this.makeup.connect(this.satDry); this.makeup.connect(this.sat); this.sat.connect(this.satWet);
-    this.satDry.connect(this.satOut); this.satWet.connect(this.satOut);
+    this.makeup.connect(this.satDry); this.sat.connect(this.satWet);
+    this.satDry.connect(this.satOut);
     this.satOut.connect(this.colDry); this.colDry.connect(this.fader);
-    this.satOut.connect(this.colHp); this.colHp.connect(this.colLp); this.colLp.connect(this.colShape);
-    this.colShape.connect(this.ring); this.ring.connect(this.colWet); this.colWet.connect(this.fader);
+    this.colHp.connect(this.colLp); this.colLp.connect(this.colShape);
+    this.colShape.connect(this.ring); this.ring.connect(this.colWet);
     this.fader.connect(this.mute);
     this.mute.connect(this.pan); this.pan.connect(this.out);
-    this.mute.connect(this.dbIn); this.dbIn.connect(this.dbHp);
+    this.dbIn.connect(this.dbHp);
     this.dbHp.connect(this.dbL); this.dbHp.connect(this.dbR);
     this.dbL.connect(this.dbPanL); this.dbR.connect(this.dbPanR);
-    this.dbPanL.connect(this.dbGain); this.dbPanR.connect(this.dbGain); this.dbGain.connect(this.out);
-    if (sends) {
-      this.mute.connect(this.revSend); this.mute.connect(this.dlySend);
-      this.revSend.connect(sends.revIn); this.dlySend.connect(sends.dlyIn);
-    }
+    this.dbPanL.connect(this.dbGain); this.dbPanR.connect(this.dbGain);
+    if (sends) { this.revSend.connect(sends.revIn); this.dlySend.connect(sends.dlyIn); }
+    this.hasSends = !!sends;
     this.out.connect(dest);
     if (meter) { this.analyser = ctx.createAnalyser(); this.analyser.fftSize = 512; this.out.connect(this.analyser); }
     this._satAmt = -1; this._dsAmt = -1; this._col = '';
+    this.routes = {};
     this.update(cfg);
+  }
+
+  // connect costly processing only while it is actually used (keeps phones fast)
+  route(name, on) {
+    if (!!this.routes[name] === on) return;
+    this.routes[name] = on;
+    const pairs = {
+      deess: [[this.eqOut, this.dsLo1], [this.eqOut, this.dsHi1], [this.dsSum, this.preComp]],
+      direct: [[this.eqOut, this.preComp]],
+      comp: [[this.preComp, this.comp], [this.comp, this.makeup]],
+      nocomp: [[this.preComp, this.makeup]],
+      sat: [[this.makeup, this.sat], [this.satWet, this.satOut]],
+      color: [[this.satOut, this.colHp], [this.colWet, this.fader]],
+      dbl: [[this.mute, this.dbIn], [this.dbGain, this.out]],
+    }[name];
+    if (on && name === 'color' && !this.ringOsc) {
+      this.ringOsc = this.ctx.createOscillator(); this.ringOsc.frequency.value = (COLOR_TYPES.robot.ring || 55);
+      this.ringOsc.connect(this.ringDepth); this.ringOsc.start(); this.oscs.push(this.ringOsc);
+    }
+    if (on && name === 'dbl' && !this.dblOscOn) {
+      this.dblOscOn = true;
+      [[this.dbL, 0.31], [this.dbR, 0.43]].forEach(([dl, rate]) => {
+        const o = this.ctx.createOscillator(); o.frequency.value = rate;
+        const og = this.ctx.createGain(); og.gain.value = 0.0015;
+        o.connect(og); og.connect(dl.delayTime); o.start();
+        this.oscs.push(o);
+      });
+    }
+    for (const [a, b] of pairs) { try { if (on) a.connect(b); else a.disconnect(b); } catch (e) { /* ignore */ } }
+  }
+
+  // only filters that actually change the sound are wired in
+  eqRoute(fx) {
+    const act = [];
+    if (fx.hpf > 0) act.push(this.hpf);
+    fx.eq.forEach((b, i) => { if (Math.abs(b.g) > 0.05) act.push(this.eq[i]); });
+    const key = act.map((f) => (f === this.hpf ? 'h' : this.eq.indexOf(f))).join(',');
+    if (key === this.eqChain) return;
+    this.eqChain = key;
+    try { this.input.disconnect(); } catch (e) { /* ignore */ }
+    for (const f of [this.hpf, ...this.eq]) { try { f.disconnect(); } catch (e) { /* ignore */ } }
+    let n = this.input;
+    for (const f of act) { n.connect(f); n = f; }
+    n.connect(this.eqOut);
   }
 
   update(cfg) {
     const fx = cfg.fx;
     const t = this.ctx.currentTime;
     const set = (p, v) => { try { p.setTargetAtTime(v, t, 0.015); } catch (e) { p.value = v; } };
+    this.eqRoute(fx);
     set(this.hpf.frequency, fx.hpf > 0 ? fx.hpf : 10);
     fx.eq.forEach((b, i) => {
       const f = this.eq[i];
       if (f.type !== b.type) f.type = b.type;
       set(f.frequency, b.f); set(f.gain, b.g); set(f.Q, b.q);
     });
+    const useDs = fx.deess.amount > 0;
+    this.route('deess', useDs); this.route('direct', !useDs);
     [this.dsLo1, this.dsLo2, this.dsHi1, this.dsHi2].forEach((f) => set(f.frequency, fx.deess.f));
     if (this._dsAmt !== fx.deess.amount) { this.dsMap.curve = deessCurve(fx.deess.amount); this._dsAmt = fx.deess.amount; }
     const c = fx.comp;
+    this.route('comp', !!c.on); this.route('nocomp', !c.on);
     if (c.on) {
       set(this.comp.threshold, c.threshold); set(this.comp.ratio, c.ratio); set(this.comp.knee, c.knee);
       set(this.comp.attack, c.attack / 1000); set(this.comp.release, c.release / 1000);
@@ -270,10 +312,12 @@ class Strip {
       set(this.comp.threshold, 0); set(this.comp.ratio, 1); set(this.comp.knee, 0);
     }
     set(this.makeup.gain, dbToGain(fx.gain || 0));
-    if (this._satAmt !== fx.sat) { this.sat.curve = satCurve(fx.sat); this._satAmt = fx.sat; }
+    if (this._satAmt !== fx.sat) { this.sat.curve = satCurve(fx.sat); this.sat.oversample = fx.sat > 0.3 ? '2x' : 'none'; this._satAmt = fx.sat; }
+    this.route('sat', fx.sat > 0);
     set(this.satWet.gain, fx.sat * 0.6); set(this.satDry.gain, 1 - fx.sat * 0.45);
     const col = fx.color || { type: 'none', mix: 0 };
     const ct = COLOR_TYPES[col.type] || COLOR_TYPES.none;
+    this.route('color', col.type !== 'none' && col.mix > 0);
     const key = col.type;
     if (this._col !== key) {
       this._col = key;
@@ -281,7 +325,7 @@ class Strip {
         this.colHp.frequency.value = ct.hp; this.colHp.Q.value = ct.q;
         this.colLp.frequency.value = ct.lp; this.colLp.Q.value = ct.q;
         this.colShape.curve = satCurve(ct.drive, ct.bits);
-        this.ringOsc.frequency.value = ct.ring || 55;
+        if (this.ringOsc) this.ringOsc.frequency.value = ct.ring || 55;
       }
     }
     const isRing = col.type === 'robot';
@@ -290,7 +334,13 @@ class Strip {
     const mix = col.type === 'none' ? 0 : col.mix;
     set(this.colWet.gain, mix * (isRing ? 1.4 : 1.1)); set(this.colDry.gain, 1 - mix);
     set(this.dbGain.gain, (fx.doubler || 0) * 0.55);
+    this.route('dbl', (fx.doubler || 0) > 0);
     set(this.revSend.gain, fx.rev || 0); set(this.dlySend.gain, fx.dly || 0);
+    if (this.hasSends) {
+      const r = (fx.rev || 0) > 0, d = (fx.dly || 0) > 0;
+      if (!!this.routes.rev !== r) { this.routes.rev = r; try { if (r) this.mute.connect(this.revSend); else this.mute.disconnect(this.revSend); } catch (e) { /* ignore */ } }
+      if (!!this.routes.dly !== d) { this.routes.dly = d; try { if (d) this.mute.connect(this.dlySend); else this.mute.disconnect(this.dlySend); } catch (e) { /* ignore */ } }
+    }
     set(this.fader.gain, dbToGain(cfg.vol || 0));
     set(this.input.gain, dbToGain(cfg.clipGain || 0));
     set(this.pan.pan, cfg.pan || 0);
@@ -318,6 +368,8 @@ class Sends {
     this.ctx = ctx;
     const g = () => ctx.createGain();
     this.revIn = g(); this.dlyIn = g();
+    // mono sends: stereo-IR reverb from a mono feed = 2 convolutions instead of 4
+    for (const n of [this.revIn, this.dlyIn]) { n.channelCount = 1; n.channelCountMode = 'explicit'; n.channelInterpretation = 'speakers'; }
     this.preDelay = ctx.createDelay(0.2);
     this.conv = ctx.createConvolver();
     this.revHp = ctx.createBiquadFilter(); this.revHp.type = 'highpass'; this.revHp.frequency.value = 220;
@@ -357,19 +409,21 @@ class Sends {
   }
 }
 
-function buildGraph(ctx, project, only) {
+function buildGraph(ctx, project, only, live) {
   const groups = project.groups;
-  const master = new Strip(ctx, { fx: groups.master.fx, vol: groups.master.vol }, null, ctx.createGain(), true);
+  const master = new Strip(ctx, { fx: groups.master.fx, vol: groups.master.vol }, null, ctx.createGain(), live);
   // master -> limiter -> trim -> out
   master.out.disconnect();
   if (master.analyser) master.out.connect(master.analyser);
   const limiter = ctx.createDynamicsCompressor();
   const trim = ctx.createGain(); trim.gain.value = dbToGain(-0.8);
-  const analyser = ctx.createAnalyser(); analyser.fftSize = 1024;
-  master.out.connect(limiter); limiter.connect(trim); trim.connect(analyser); trim.connect(ctx.destination);
-  const gv = new Strip(ctx, { fx: groups.vocal.fx, vol: groups.vocal.vol }, null, master.input, true);
-  const gb = new Strip(ctx, { fx: groups.backing.fx, vol: groups.backing.vol }, null, master.input, true);
-  const sends = new Sends(ctx, project.bus, gv.fader);
+  const analyser = live ? ctx.createAnalyser() : null;
+  master.out.connect(limiter); limiter.connect(trim); trim.connect(ctx.destination);
+  if (analyser) { analyser.fftSize = 1024; trim.connect(analyser); }
+  const gv = new Strip(ctx, { fx: groups.vocal.fx, vol: groups.vocal.vol }, null, master.input, live);
+  const gb = new Strip(ctx, { fx: groups.backing.fx, vol: groups.backing.vol }, null, master.input, live);
+  const needSends = live || project.tracks.some((t) => (!only || only(t)) && t.fx && ((t.fx.rev || 0) > 0 || (t.fx.dly || 0) > 0));
+  const sends = needSends ? new Sends(ctx, project.bus, gv.fader) : null;
   const chains = new Map();
   const anySolo = project.tracks.some((t) => t.solo);
   for (const tr of project.tracks) {
@@ -449,7 +503,7 @@ export class Engine {
     this.ensure();
     this.stop(true);
     this.disposeGraph();
-    this.graph = buildGraph(this.ctx, project);
+    this.graph = buildGraph(this.ctx, project, null, true);
     const when = this.ctx.currentTime + (opts.lead || 0.06);
     this.sources = startSources(this.ctx, project, this.graph, bufferFor, when, from);
     this.startCtxTime = when; this.startPos = from; this.playing = true;
@@ -473,7 +527,7 @@ export class Engine {
     const anySolo = project.tracks.some((t) => t.solo);
     for (const tr of project.tracks) { const ch = this.graph.chains.get(tr.id); if (ch) ch.setAudible(!tr.mute && (!anySolo || tr.solo)); }
   }
-  updateBus(project) { if (this.graph) this.graph.sends.update(project.bus); }
+  updateBus(project) { if (this.graph && this.graph.sends) this.graph.sends.update(project.bus); }
   updateGroups(project) {
     if (!this.graph) return;
     const G = project.groups;
@@ -510,49 +564,59 @@ export async function renderMix(project, bufferFor, sampleRate, include, onProgr
     if (b) end = Math.max(end, (tr.offset || 0) + b.duration);
   }
   if (end <= 0) throw new Error('書き出す音がありません');
-  if (opts.maxSec) end = Math.min(end, opts.maxSec);
+  const from = Math.max(0, Math.min(opts.from || 0, end - 1));
+  let span = end - from;
+  if (opts.maxSec) span = Math.min(span, opts.maxSec);
   const tail = opts.noTail ? 0.2 : 3.0;
-  const length = Math.ceil((end + tail) * sampleRate);
+  const length = Math.ceil((span + tail) * sampleRate);
   const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   const ctx = new OAC(2, length, sampleRate);
   const proj = Object.assign({}, project, { tracks: project.tracks.map((t) => Object.assign({}, t, { solo: false, mute: include ? !include(t) : t.mute })) });
-  const graph = buildGraph(ctx, proj, include);
-  startSources(ctx, proj, graph, bufferFor, 0, 0);
+  const graph = buildGraph(ctx, proj, include, false);
+  startSources(ctx, proj, graph, bufferFor, 0, from);
   let timer = null;
   if (onProgress) timer = setInterval(() => { try { onProgress(Math.min(0.99, ctx.currentTime / (length / sampleRate))); } catch (e) { /* ignore */ } }, 200);
   const out = await ctx.startRendering();
   if (timer) clearInterval(timer);
   const L = out.getChannelData(0), R = out.getChannelData(1);
   let last = out.length - 1;
-  while (last > (end * sampleRate) && Math.abs(L[last]) < 1e-4 && Math.abs(R[last]) < 1e-4) last--;
+  while (last > (span * sampleRate) && Math.abs(L[last]) < 1e-4 && Math.abs(R[last]) < 1e-4) last--;
   return { L: L.subarray(0, last + 1), R: R.subarray(0, last + 1), sampleRate };
 }
 
+// writes the WAV in small parts so no single huge allocation is needed
 export function encodeWav(channels, sampleRate, bits) {
   const nCh = channels.length, n = channels[0].length;
   const bps = bits / 8;
   const dataLen = n * nCh * bps;
-  const buf = new ArrayBuffer(44 + dataLen);
-  const v = new DataView(buf);
+  const hdr = new ArrayBuffer(44);
+  const v = new DataView(hdr);
   const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
   ws(0, 'RIFF'); v.setUint32(4, 36 + dataLen, true); ws(8, 'WAVE');
   ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, nCh, true);
   v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * nCh * bps, true);
   v.setUint16(32, nCh * bps, true); v.setUint16(34, bits, true);
   ws(36, 'data'); v.setUint32(40, dataLen, true);
-  let o = 44;
-  if (bits === 16) {
-    for (let i = 0; i < n; i++) for (let c = 0; c < nCh; c++) {
-      const dither = (Math.random() - Math.random()) / 32768;
-      const s = Math.max(-1, Math.min(1, channels[c][i] + dither));
-      v.setInt16(o, s < 0 ? s * 32768 : s * 32767, true); o += 2;
+  const parts = [hdr];
+  const CH = 131072;
+  for (let s0 = 0; s0 < n; s0 += CH) {
+    const m = Math.min(CH, n - s0);
+    const u8 = new Uint8Array(m * nCh * bps);
+    let o = 0;
+    if (bits === 16) {
+      for (let i = s0; i < s0 + m; i++) for (let c = 0; c < nCh; c++) {
+        const s = Math.max(-1, Math.min(1, channels[c][i] + (Math.random() - Math.random()) / 32768));
+        const iv = s < 0 ? Math.round(s * 32768) : Math.round(s * 32767);
+        u8[o++] = iv & 255; u8[o++] = (iv >> 8) & 255;
+      }
+    } else {
+      for (let i = s0; i < s0 + m; i++) for (let c = 0; c < nCh; c++) {
+        const s = Math.max(-1, Math.min(1, channels[c][i]));
+        const iv = Math.round(s < 0 ? s * 8388608 : s * 8388607);
+        u8[o++] = iv & 255; u8[o++] = (iv >> 8) & 255; u8[o++] = (iv >> 16) & 255;
+      }
     }
-  } else {
-    for (let i = 0; i < n; i++) for (let c = 0; c < nCh; c++) {
-      const s = Math.max(-1, Math.min(1, channels[c][i]));
-      const iv = Math.round(s < 0 ? s * 8388608 : s * 8388607);
-      v.setUint8(o, iv & 255); v.setUint8(o + 1, (iv >> 8) & 255); v.setUint8(o + 2, (iv >> 16) & 255); o += 3;
-    }
+    parts.push(u8);
   }
-  return new Blob([buf], { type: 'audio/wav' });
+  return new Blob(parts, { type: 'audio/wav' });
 }
