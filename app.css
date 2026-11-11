@@ -335,3 +335,4 @@ pre.tree { background: var(--panel3); border-radius: 10px; padding: 10px 12px; f
 .group-head .gh-dot { display: none; }
 .group-head .gh-name { font-size: 11.5px; }
 .group-head .gfx { width: 24px; margin-right: 4px; }
+.link-btn { background: none; color: var(--mint); font-size: 12.5px; font-weight: 700; padding: 8px 0; text-align: left; }

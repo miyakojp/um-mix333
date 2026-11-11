@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
 import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT, flatFx, groupCfg } from './audio-engine.js';
-export const APP_VERSION = 'v11';
+export const APP_VERSION = 'v12';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -2859,7 +2859,7 @@ function offerFile(blob, filename, title, sub) {
     c.append(h('h3', {}, title), h('p', {}, filename + (sub ? ' · ' + sub : '')),
       h('div', { class: 'actions' },
         h('button', { class: 'big-btn primary', onclick: share }, canShare ? '⇪ 共有（保存・送信）' : 'ダウンロード'),
-        h('p', { class: 'note', style: 'margin:0' }, canShare ? (settings.filesShortcut ? '共有メニューで「UtaMixに保存」を選ぶと、ファイルAppの UtaMix フォルダに自動で入ります。' : '共有メニューから「“ファイル”に保存」・LINE・AirDrop などを選べます。（⋯ →「ファイルAppに自動保存」を設定すると、フォルダ分けして自動で入ります）') : ''),
+        h('p', { class: 'note', style: 'margin:0' }, canShare ? (settings.filesShortcut ? '共有メニューで「UtaMixに保存」を押すと、ファイルAppの UtaMix フォルダに入ります。' : '共有メニューの「“ファイル”に保存」でファイルAppに入れられます（LINE・AirDrop も可）。') : ''),
         canShare ? h('button', { class: 'big-btn ghost', onclick: download }, 'ダウンロードとして保存') : null,
         h('button', { class: 'big-btn ghost', onclick: close }, '閉じる')));
   }, { sticky: true });
@@ -2963,7 +2963,7 @@ function studioMenu() {
       h('button', { class: 'big-btn', onclick: async () => { close(); const n = await promptModal('別名で保存', project.name + ' のコピー', '保存'); if (!n) return; await flushSave(); const np = await duplicateProject(project, n); if (np) openProject(np.id); } }, '別名で保存'),
       h('button', { class: 'big-btn', onclick: async () => { close(); const n = await promptModal('プロジェクト名', project.name); if (n) { project.name = n; saveProject(); refreshStudio(); } } }, '名前を変更'),
       h('button', { class: 'big-btn', onclick: () => { close(); recordSettings(); } }, '録音の設定'),
-      h('button', { class: 'big-btn', onclick: () => { close(); filesSaveSheet(); } }, 'ファイルAppに自動保存'),
+      h('button', { class: 'big-btn', onclick: () => { close(); filesSaveSheet(); } }, 'ファイルAppに保存'),
       h('button', { class: 'big-btn', onclick: () => { close(); if (bg.playing) bgStop(); else bgStart(); } }, bg.playing ? 'バックグラウンド再生を止める' : 'バックグラウンド再生（画面オフで聴く）'),
       h('button', { class: 'big-btn', onclick: async () => { close(); await flushSave(); exportBackup(project); } }, 'バックアップファイルを保存'),
       h('button', { class: 'big-btn', onclick: () => { close(); aboutModal(); } }, '使い方・安全性'),
@@ -2973,26 +2973,36 @@ function studioMenu() {
 // ---- saving into the iPhone Files app (via an iPhone Shortcut, since web apps cannot write there by themselves) ----
 function filesSaveSheet() {
   openModal((c, close) => {
+    const step = (n, t) => h('li', {}, h('b', {}, n + '. '), t);
+    let adv = false;
     const render = () => {
       c.innerHTML = '';
-      const step = (n, t) => h('li', {}, h('b', {}, n + '. '), t);
-      c.append(h('h3', {}, 'ファイルAppに自動保存'),
-        h('p', {}, '保存（✓）や書き出しのあとに出る共有メニューで「UtaMixに保存」を選ぶと、ファイルAppにフォルダが自動で作られて、その中に入ります。'),
-        h('pre', { class: 'tree' }, 'UtaMix/\n └ 曲名/\n    ├ 曲名.utamix   ← プロジェクト\n    └ Output/\n       ├ 曲名__mix.wav ← 書き出し\n       └ 曲名__vocals.wav'),
-        switchRow('✓ でプロジェクトファイルも作る', !!settings.filesSave, (v) => { settings.filesSave = v; saveSettings(); }),
-        switchRow('ショートカットを作った', !!settings.filesShortcut, (v) => { settings.filesShortcut = v; saveSettings(); }),
-        h('div', { class: 'lbl-line' }, 'ショートカットの作り方（最初に1回だけ）'),
+      c.append(h('h3', {}, 'ファイルAppに保存'),
+        switchRow('✓（保存）でプロジェクトファイルも作る', !!settings.filesSave, (v) => { settings.filesSave = v; saveSettings(); }),
+        h('p', { class: 'note', style: 'margin:0 0 10px' }, '保存や書き出しのあと、共有メニューが出ます。そこからファイルAppに入れます。ファイル名は「曲名.utamix」「曲名__mix.wav」のように曲名から始まるので、同じフォルダに入れても曲ごとに並びます。'),
+
+        h('div', { class: 'lbl-line' }, 'A. いちばん簡単（設定なし）'),
         h('ol', { class: 'howto' },
-          step(1, '「ショートカット」Appを開き、右上の「＋」→ 名前を「UtaMixに保存」にする'),
-          step(2, '下の「ⓘ（詳細）」→「共有シートに表示」をオン。受け取る種類は「ファイル」だけにする'),
-          step(3, 'アクション「ファイルの詳細を取得」→「名前」を「ショートカットの入力」から取得'),
-          step(4, 'アクション「テキストを分割」→ 3の「名前」を、区切り「カスタム」で __（アンダーバー2つ）で分割'),
-          step(5, 'アクション「リストから項目を取得」→「最初の項目」（これが曲名）'),
-          step(6, 'アクション「ファイルの詳細を取得」→「ファイル拡張子」を「ショートカットの入力」から取得'),
-          step(7, 'アクション「if」→ 6の「ファイル拡張子」が「wav」と等しい場合：「テキスト」に UtaMix/［5の項目］/Output/ 、「その他の場合」：「テキスト」に UtaMix/［5の項目］/'),
-          step(8, 'アクション「フォルダを作成」→ 場所は「iCloud Drive」（または「このiPhone内」）、パスに 7の「if の結果」'),
-          step(9, 'アクション「ファイルを保存」→「ショートカットの入力」を保存。「保存先を尋ねる」はオフ、保存先は8と同じ場所、サブパスに 7の「if の結果」、「上書き」はオン')),
-        h('p', { class: 'note' }, 'iPhoneのWebアプリは、ファイルAppに勝手にフォルダを作ることがOSの仕組み上できません。そのため、iPhone標準の「ショートカット」に保存をおまかせします。共有メニューで1回タップするだけで、毎回同じ場所に整理して入ります。'),
+          step(1, '共有メニューで「“ファイル”に保存」を選ぶ'),
+          step(2, '最初の1回だけ「UtaMix」フォルダを作って選ぶ（次からは同じ場所が最初に出ます）')),
+
+        h('div', { class: 'lbl-line' }, 'B. ワンタップで自動保存（ショートカットを1回作る）'),
+        h('ol', { class: 'howto' },
+          step(1, '「ショートカット」Appで「＋」→ 下の「ⓘ」→「共有シートに表示」をオン'),
+          step(2, '「アクションを追加」で「ファイルを保存」を検索して追加'),
+          step(3, '「保存先を尋ねる」をオフ →「保存先」で「UtaMix」フォルダを選び、「上書き」をオン。名前を「UtaMixに保存」にして完了')),
+        h('p', { class: 'note', style: 'margin:0 0 6px' }, '以後は共有メニューで「UtaMixに保存」を押すだけで、毎回 UtaMix フォルダに入ります。'),
+        switchRow('ショートカットを作った', !!settings.filesShortcut, (v) => { settings.filesShortcut = v; saveSettings(); }),
+        h('button', { class: 'link-btn', onclick: () => { adv = !adv; render(); } }, adv ? '▲ 曲ごとのフォルダ分け（上級）を閉じる' : '▼ 曲ごと・Outputフォルダに分けたい人へ（上級）'),
+        adv ? h('div', {},
+          h('pre', { class: 'tree' }, 'UtaMix/\n └ 曲名/\n    ├ 曲名.utamix\n    └ Output/\n       └ 曲名__mix.wav'),
+          h('p', { class: 'note' }, 'Bのショートカットの「ファイルを保存」の前に、次のアクションを足します。'),
+          h('ol', { class: 'howto' },
+            step(1, '「ファイルの詳細を取得」→「名前」'),
+            step(2, '「テキストを分割」→ カスタム「__」で分割'),
+            step(3, '「リストから項目を取得」→「最初の項目」（＝曲名）'),
+            step(4, '「ファイルを保存」の「サブパス」に「［最初の項目］/」と入れる（書き出しはファイル名で並ぶので Output 分けは任意）'))) : null,
+        h('p', { class: 'note' }, 'iPhoneのWebアプリは、OSの仕組み上ファイルAppへ勝手に保存できないため、このどちらかの方法になります。'),
         h('div', { class: 'actions' }, h('button', { class: 'big-btn ghost', onclick: close }, '閉じる')));
     };
     render();
