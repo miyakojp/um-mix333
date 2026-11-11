@@ -571,6 +571,12 @@
       this.gv = new Strip(sr, { fx: gr.vocal.fx, vol: gr.vocal.vol }, 2);
       this.gb = new Strip(sr, { fx: gr.backing.fx, vol: gr.backing.vol }, 2);
       this.master = new Strip(sr, { fx: gr.master.fx, vol: gr.master.vol }, 2);
+      const dd = gr.backing.fxOff ? 0 : (gr.backing.duck || 0);
+      if (dd > 0) {
+        const n = 1024, eqC = new Float32Array(n), gC = new Float32Array(n);
+        for (let i = 0; i < n; i++) { const x = Math.abs(i / (n - 1) * 2 - 1), r = Math.min(1, x / 0.06); eqC[i] = -dd * r; gC[i] = Math.pow(10, -0.3 * dd * r / 20) - 1; }
+        this.duck = { eqC, gC, env: new BQ('lowpass', 8, 0, 0, sr), st: [new Float64Array(4), new Float64Array(4)], cur: 1e9, c: null };
+      }
       this.limiter = gr.master.limiter ? new Comp(sr, -1.5, 0, 20, 0.002, 0.12) : new Comp(sr, 0, 0, 1, 0.003, 0.25);
       this.trim = dbToGain(-0.8);
       const needSends = cfg.tracks.some((t) => (t.fx.rev || 0) > 0 || (t.fx.dly || 0) > 0 || (t.auto && (t.auto.rev || t.auto.dly)));
@@ -595,8 +601,35 @@
         let ret = null;
         if (this.sends) { ret = [new Float32Array(B), new Float32Array(B)]; this.sends.process(rev, dly, ret[0], ret[1]); }
         const mL = new Float32Array(B), mR = new Float32Array(B);
-        this.gv.process([vL, vR], B, ret, mL, mR, null, null);
-        this.gb.process([bL, bR], B, null, mL, mR, null, null);
+        if (this.duck) {
+          // vocal group → envelope → dip in the backing around 3 kHz + slight level drop
+          const gvL = new Float32Array(B), gvR = new Float32Array(B);
+          this.gv.process([vL, vR], B, ret, gvL, gvR, null, null);
+          const gbL = new Float32Array(B), gbR = new Float32Array(B);
+          this.gb.process([bL, bR], B, null, gbL, gbR, null, null);
+          const D = this.duck, sr = this.sr;
+          const eL = new Float32Array(B), eR = new Float32Array(B);
+          for (let i = 0; i < B; i++) { eL[i] = Math.abs(gvL[i]); eR[i] = Math.abs(gvR[i]); }
+          D.env.run(eL, 0); D.env.run(eR, 1);
+          for (let i0 = 0; i0 < B; i0 += 32) {
+            const e = Math.min(B, i0 + 32);
+            for (let i = i0; i < e; i++) {
+              const dB = 0.5 * (shape(D.eqC, eL[i]) + shape(D.eqC, eR[i]));
+              if (Math.abs(dB - D.cur) > 0.02) { D.cur = dB; D.c = new BQ('peaking', 2800, 0.7, dB, sr).c; }
+              const c = D.c, gg = 1 + 0.5 * (shape(D.gC, eL[i]) + shape(D.gC, eR[i]));
+              for (let ch = 0; ch < 2; ch++) {
+                const st = D.st[ch], xi = ch ? gbR[i] : gbL[i];
+                let yi = c[0] * xi + c[1] * st[0] + c[2] * st[1] - c[3] * st[2] - c[4] * st[3];
+                st[1] = st[0]; st[0] = xi; st[3] = st[2]; st[2] = yi;
+                if (ch) mR[i] += yi * gg; else mL[i] += yi * gg;
+              }
+            }
+          }
+          for (let i = 0; i < B; i++) { mL[i] += gvL[i]; mR[i] += gvR[i]; }
+        } else {
+          this.gv.process([vL, vR], B, ret, mL, mR, null, null);
+          this.gb.process([bL, bR], B, null, mL, mR, null, null);
+        }
         const oL = new Float32Array(B), oR = new Float32Array(B);
         this.master.process([mL, mR], B, null, oL, oR, null, null);
         this.limiter.run([oL, oR]);

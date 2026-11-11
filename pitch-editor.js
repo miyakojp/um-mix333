@@ -4,7 +4,7 @@ const KW = 42;  // keyboard width
 const RH = 22;  // ruler height
 const BLACK = new Set([1, 3, 6, 8, 10]);
 const TOOL_HINT = {
-  pitch: '音のかたまりを上下にドラッグで音程を変更。ダブルタップで分割。',
+  pitch: '上下にドラッグで音程、左右にドラッグでタイミング。ダブルタップで分割。',
   time: 'ノートを左右にドラッグで位置を移動。両端をつかむと長さを変更。ダブルタップで元に戻す。',
   amp: 'ノートを上下にドラッグで音量を変更。ダブルタップでミュート（消音）。',
   formant: 'ノートを上下にドラッグで声質（フォルマント）を変更。上げると細く若く、下げると太く大人っぽく。',
@@ -423,6 +423,17 @@ export class PitchEditor {
   }
 
   // time-tool limits for note i
+  // move a group of notes sideways together (from their original offsets); they stop at notes not being moved
+  blockMove(orig, d) {
+    let dd = d;
+    for (const [i, o] of orig) {
+      const L = this.timeLimits(i);
+      if (dd < 0 && !orig.has(i - 1)) dd = Math.max(dd, Math.min(0, L.lo - (L.s0 + o.ts)));
+      if (dd > 0 && !orig.has(i + 1)) dd = Math.min(dd, Math.max(0, L.hi - (L.e0 + o.te)));
+      dd = Math.max(dd, -L.s0 - o.ts);
+    }
+    for (const [i, o] of orig) { const q = this.notes[i]; q.ts = o.ts + dd; q.te = o.te + dd; }
+  }
   timeLimits(i) {
     const notes = this.notes, n = notes[i], hop = this.hop;
     const prev = notes[i - 1], next = notes[i + 1];
@@ -509,7 +520,10 @@ export class PitchEditor {
       if (!moved && mode === 'drag') this.pushUndo();
       moved = true;
       if (mode === 'drag') {
-        if (this.tool === 'pitch') {
+        if (this.tool === 'pitch' && !drag.axis) drag.axis = Math.abs(dx) > Math.abs(dy) * 1.3 ? 'h' : 'v';
+        if (this.tool === 'pitch' && drag.axis === 'h') {
+          this.blockMove(drag.orig, dx / this.pps);
+        } else if (this.tool === 'pitch') {
           const d = -dy / this.pxSemi;
           for (const [k, o] of drag.orig) this.notes[k].t = this.snap ? Math.round(o.t + d) : o.t + d;
         } else if (this.tool === 'amp') {
@@ -522,9 +536,7 @@ export class PitchEditor {
           const i = drag.i, n = this.notes[i], o = drag.orig.get(i), L = this.timeLimits(i);
           let d = dx / this.pps;
           if (drag.zone === 'move') {
-            d = Math.max(L.lo - (L.s0 + o.ts), Math.min(L.hi - (L.e0 + o.te), d));
-            d = Math.max(-L.s0 - o.ts, d);
-            n.ts = o.ts + d; n.te = o.te + d;
+            this.blockMove(drag.orig, d);
           } else if (drag.zone === 'start') {
             const ns = Math.max(L.lo, Math.min(L.e0 + o.te - 0.03, L.s0 + o.ts + d));
             n.ts = ns - L.s0;
@@ -696,7 +708,13 @@ export class PitchEditor {
           h('button', { onclick: () => this.setSel((q) => { q.t = q.c; q.flat = 0; q.vib = 1; }) }, '元に戻す')));
         p.append(
           slider('ゆらぎ補正', 0, 1, 0.05, n.flat || 0, pct, (v) => { for (const i of selIdx) notes[i].flat = v; this.recalc(); this.draw(); }, () => { this.pushUndo(); this.committed(); }),
-          slider('ビブラート', 0, 2, 0.05, n.vib != null ? n.vib : 1, (v) => v === 0 ? 'なし' : pct(v), (v) => { for (const i of selIdx) notes[i].vib = v; this.recalc(); this.draw(); }, () => { this.pushUndo(); this.committed(); }));
+          slider('ビブラート', 0, 2, 0.05, n.vib != null ? n.vib : 1, (v) => v === 0 ? 'なし' : pct(v), (v) => { for (const i of selIdx) notes[i].vib = v; this.recalc(); this.draw(); }, () => { this.pushUndo(); this.committed(); }),
+          slider('足す揺れ', 0, 100, 5, Math.round((n.vadd || 0) * 100), (v) => v === 0 ? 'なし' : '±' + v + ' cent', (v) => { for (const i of selIdx) notes[i].vadd = v / 100; this.recalc(); this.draw(); }, () => { this.pushUndo(); this.committed(); }),
+          (n.vadd || 0) > 0 ? slider('ゆれの速さ', 4, 8, 0.1, n.vrate || 5.5, (v) => v.toFixed(1) + ' 回/秒', (v) => { for (const i of selIdx) notes[i].vrate = v; this.recalc(); this.draw(); }, () => { this.pushUndo(); this.committed(); }) : null,
+          h('div', { class: 'mini-btns', style: 'margin:4px 0' },
+            h('button', { onclick: () => { this.setSel((q) => { q.vadd = 0.3; q.vrate = 5.2; }); this.renderPanel(); } }, 'ビブラート：ゆったり'),
+            h('button', { onclick: () => { this.setSel((q) => { q.vadd = 0.45; q.vrate = 6.3; }); this.renderPanel(); } }, '細かく'),
+            h('button', { onclick: () => { this.setSel((q) => { q.vadd = 0; }); this.renderPanel(); } }, '足したのを消す')));
       } else if (this.tool === 'amp') {
         p.append(slider('音量', -30, 12, 0.5, n.gain || 0, (v) => (v > 0 ? '+' : '') + v + ' dB', (v) => { for (const i of selIdx) notes[i].gain = v; this.draw(); }, () => { this.pushUndo(); this.committed(); }),
           h('div', { class: 'mini-btns', style: 'margin:6px 0' },

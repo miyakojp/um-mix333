@@ -40,6 +40,8 @@ export const PRESETS = {
   kawaii: V({ name: 'かわいい', desc: '軽やかで高域キラッ', hpf: 130, eq: eqBands([300, -2.5], [1000, -1], [4200, 2.5], [12500, 4.5]), deess: { f: 7200, amount: 0.55 }, comp: comp(-24, 3.5, 10, 90, 6), sat: 0.05, doubler: 0.1, rev: 0.25, dly: 0.14 }),
   ballad: V({ name: 'バラード', desc: '柔らかく広い響き', hpf: 80, eq: eqBands([250, -2], [1000, 0], [2500, 1.5], [10000, 3]), deess: { f: 6000, amount: 0.35 }, comp: comp(-20, 2.5, 25, 150, 10), rev: 0.36, dly: 0.16 }),
   band: V({ name: 'バンドボーカル', desc: 'バンドに負けない太さと抜け', hpf: 110, eq: eqBands([350, -2.5], [1200, 1.5], [3000, 3], [10000, 2]), deess: { f: 6800, amount: 0.5 }, comp: comp(-27, 4.5, 5, 70, 4), sat: 0.22, doubler: 0.12, rev: 0.16, dly: 0.12 }),
+  power: V({ name: 'ハイトーン・パワフル', desc: '張りのある高音を太く前に。歌い手らしい密度', hpf: 110, eq: eqBands([300, -3], [1200, 1], [3200, 3.5], [12000, 4]), deess: { f: 7200, amount: 0.65 }, comp: comp(-30, 5, 3, 60, 4), sat: 0.25, doubler: 0.15, rev: 0.2, dly: 0.16 }),
+  airy: V({ name: '透明感・エモ', desc: '息まできれいに、広く響かせる', hpf: 120, eq: eqBands([280, -2.5], [900, -1.5], [4500, 2.5], [13000, 5]), deess: { f: 7000, amount: 0.6 }, comp: comp(-28, 4, 5, 90, 6), sat: 0.1, doubler: 0.12, rev: 0.32, dly: 0.18 }),
   rock: V({ name: 'ロック', desc: '芯のある力強い声', hpf: 120, eq: eqBands([400, -2], [1200, 1], [2200, 3.5], [9000, 1.5]), comp: comp(-26, 5, 6, 60, 4), sat: 0.35, doubler: 0.1, rev: 0.12, dly: 0.1 }),
   whisper: V({ name: 'ウィスパー', desc: '息っぽく近い', hpf: 100, eq: eqBands([300, -1], [800, -1.5], [4500, 2], [13000, 5]), deess: { f: 7200, amount: 0.6 }, comp: comp(-28, 3.5, 12, 100, 8), rev: 0.15, dly: 0.04 }),
   flat: V({ name: 'なし', desc: 'エフェクトなし', hpf: 0, eq: eqBands([300, 0], [1000, 0], [3500, 0], [11000, 0]), deess: { f: 6500, amount: 0 }, comp: COMP_OFF, rev: 0, dly: 0 }),
@@ -125,7 +127,7 @@ export function defaultBus() {
 export function defaultGroups() {
   return {
     vocal: { vol: 0, fx: fxFromPreset(DEFAULT_PRESET.gvocal) },
-    backing: { vol: 0, fx: fxFromPreset(DEFAULT_PRESET.gbacking) },
+    backing: { vol: 0, fx: fxFromPreset(DEFAULT_PRESET.gbacking), duck: 2 },
     master: { vol: 0, fx: fxFromPreset(DEFAULT_PRESET.gmaster), limiter: true },
   };
 }
@@ -489,7 +491,10 @@ function buildGraph(ctx, project, only, live) {
   master.out.connect(limiter); limiter.connect(trim); trim.connect(ctx.destination);
   if (analyser) { analyser.fftSize = 1024; trim.connect(analyser); }
   const gv = new Strip(ctx, groupCfg(groups.vocal), null, master.input, live);
-  const gb = new Strip(ctx, groupCfg(groups.backing), null, master.input, live);
+  const duckDb = groups.backing.fxOff ? 0 : (groups.backing.duck || 0);
+  let duck = null;
+  if (duckDb > 0) { duck = buildDuck(ctx, gv.out, duckDb); duck.output.connect(master.input); }
+  const gb = new Strip(ctx, groupCfg(groups.backing), null, duck ? duck.input : master.input, live);
   const needSends = live || project.tracks.some((t) => (!only || only(t)) && t.fx && ((t.fx.rev || 0) > 0 || (t.fx.dly || 0) > 0 || (t.clips || []).some((c) => c.fx && (c.fx.echo > 0 || c.fx.reverb > 0))));
   const sends = needSends ? new Sends(ctx, project.bus, gv.fader) : null;
   const chains = new Map();
@@ -508,6 +513,31 @@ function setLimiter(graph, on, t) {
   const l = graph.limiter;
   if (on) { l.threshold.setValueAtTime(-1.5, t); l.ratio.setValueAtTime(20, t); l.knee.setValueAtTime(0, t); l.attack.setValueAtTime(0.002, t); l.release.setValueAtTime(0.12, t); }
   else { l.threshold.setValueAtTime(0, t); l.ratio.setValueAtTime(1, t); l.knee.setValueAtTime(0, t); }
+}
+
+// ---- なじませ: the backing makes a little room (around 3 kHz, and a touch overall) while the voice sings ----
+export function duckCurves(db) {
+  const n = 1024, eqC = new Float32Array(n), gC = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = Math.abs(i / (n - 1) * 2 - 1);
+    const r = Math.min(1, x / 0.06);
+    eqC[i] = -db * r;                                   // dB for the 3 kHz dip
+    gC[i] = Math.pow(10, -0.3 * db * r / 20) - 1;       // added to a gain of 1
+  }
+  return { eqC, gC };
+}
+function buildDuck(ctx, vocalOut, db) {
+  const { eqC, gC } = duckCurves(db);
+  const abs = ctx.createWaveShaper(); abs.curve = ABS_CURVE;
+  const env = ctx.createBiquadFilter(); env.type = 'lowpass'; env.frequency.value = 8; env.Q.value = 0;
+  const mapEq = ctx.createWaveShaper(); mapEq.curve = eqC;
+  const mapG = ctx.createWaveShaper(); mapG.curve = gC;
+  const eq = ctx.createBiquadFilter(); eq.type = 'peaking'; eq.frequency.value = 2800; eq.Q.value = 0.7; eq.gain.value = 0;
+  const g = ctx.createGain(); g.gain.value = 1;
+  vocalOut.connect(abs); abs.connect(env); env.connect(mapEq); env.connect(mapG);
+  mapEq.connect(eq.gain); mapG.connect(g.gain);
+  eq.connect(g);
+  return { input: eq, output: g };
 }
 
 // ---- effects ON/OFF: an "OFF" strip keeps volume / pan but no processing at all ----

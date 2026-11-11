@@ -271,6 +271,17 @@
       const vib = nt.vib != null ? nt.vib : 1;
       const s = Math.max(0, nt.s), e = Math.min(n, nt.e);
       for (let k = s; k < e; k++) { base[k] = sh; has[k] = 1; }
+      // added vibrato: starts a little after the note begins and fades in, like a singer's natural vibrato
+      if (nt.vadd > 0 && e - s > 8) {
+        const hop = an.hop, T = (e - s) * hop, rate = nt.vrate || 5.5;
+        const delay = Math.min(0.35, T * 0.25), fin = 0.25, fout = 0.06;
+        for (let k = s; k < e; k++) {
+          const t = (k - s) * hop;
+          if (t < delay) continue;
+          const w = Math.min(1, (t - delay) / fin, Math.max(0, (T - t) / fout));
+          devTerm[k] += nt.vadd * w * Math.sin(2 * Math.PI * rate * (t - delay));
+        }
+      }
       if (drift === 0 && vib === 1) continue;
       const len = e - s;
       if (len <= 0) continue;
@@ -877,7 +888,8 @@
     const W = Math.round(0.015 * sr);
     const cs = new Float64Array(len + 1);
     for (let i = 0; i < len; i++) cs[i + 1] = cs[i] + Math.abs(hp[i]);
-    const thr = 9 - 6 * sens, absMin = 0.004 - 0.002 * sens;
+    // sens 0..1 = normal range, up to 1.3 = "最強" (catches smaller clicks too)
+    const thr = sens <= 1 ? 9 - 6 * sens : Math.max(1.6, 3 - 4.5 * (sens - 1)), absMin = Math.max(0.0012, 0.004 - 0.002 * Math.min(1, sens) - 0.002 * Math.max(0, sens - 1));
     const maxLen = Math.round(0.004 * sr), pad = Math.round(0.001 * sr), gapJoin = Math.round(0.001 * sr);
     const regions = [];
     let a = -1, lastHit = -1;
@@ -943,11 +955,13 @@
       if (an.f0[k]) { k++; continue; }
       let j = k; while (j < n && !an.f0[j]) j++;
       const a = k + 2, b = j - 4; // keep consonant right before the next vowel
-      if (b - a >= 13) {
+      // stronger settings also catch shorter / louder breaths
+      const strong = db > 18;
+      if (b - a >= (strong ? 9 : 13)) {
         let mx = 0, sum = 0;
         for (let q = a; q < b; q++) { mx = Math.max(mx, an.rms[q]); sum += an.rms[q]; }
         const mean = sum / (b - a);
-        if (mean > vmed * 0.015 && mx < vmed * 0.7) { for (let q = a; q < b; q++) gain[q] = gl; count++; }
+        if (mean > vmed * 0.015 && mx < vmed * (strong ? 0.9 : 0.7)) { for (let q = a; q < b; q++) gain[q] = gl; count++; }
       }
       k = j;
     }

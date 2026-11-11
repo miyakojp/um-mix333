@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
 import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT, flatFx, groupCfg } from './audio-engine.js';
-export const APP_VERSION = 'v14';
+export const APP_VERSION = 'v15';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -227,7 +227,7 @@ function needsProcessing(tr) {
 }
 function cleanParams(tr) {
   const c = tr.clean;
-  return { nr: true, auto: c.auto, reduceDb: c.reduceDb, sens: c.sens, click: c.auto ? 0.5 : c.click, breath: c.auto ? 0 : c.breath, profile: c.profile };
+  return { nr: true, auto: c.auto, reduceDb: c.reduceDb, sens: c.sens, click: c.auto ? (c.autoClick != null ? c.autoClick : 0.5) : c.click, breath: c.auto ? (c.autoBreath || 0) : c.breath, profile: c.profile };
 }
 function curvesFor(tr, an, extraNotes) {
   return DSP.noteCurves(an, extraNotes || tr.pitch.notes || [], { transitionMs: tr.pitch.transitionMs, cuts: tr.cuts, tune: tr.pitch.tuneOn ? tr.pitch.tune : null, key: project.key });
@@ -2067,6 +2067,10 @@ function buildGroupFxTab(body, gr) {
   body.append(fxOnOffRow(gs));
   if (gs.fxOff) body.append(h('p', { class: 'note', style: 'margin:0 0 8px' }, `${gr.name}のエフェクトがオフです（音量${gr.key === 'master' ? '・リミッター' : ''}はそのまま）。書き出しもオフのままになります。`));
   body.append(slider({ label: '音量', min: -24, max: 12, step: 0.5, value: gs.vol, fmt: fmtDb, oninput: (v) => { gs.vol = v; changed(); } }));
+  if (gr.key === 'backing') {
+    body.append(slider({ label: 'なじませ', min: 0, max: 6, step: 0.5, value: gs.duck || 0, fmt: (v) => v === 0 ? 'オフ' : v + ' dB', oninput: (v) => { gs.duck = v; saveProject(); }, onchange: () => { if (engine.playing) playFrom(engine.position, currentPlayFilter); } }),
+      h('p', { class: 'note', style: 'margin:-4px 0 8px' }, '歌っている間だけ、音源の「歌とぶつかる帯域（3kHzあたり）」を少しよけて、歌と音源をなじませます。歌い手さんのMIXでよく使われる方法です。'));
+  }
   if (gr.key === 'master') body.append(switchRow('リミッター（音割れ防止）', gs.limiter, (v) => { gs.limiter = v; changed(); }));
   body.append(presetGrid(gr.cat, gs.fx.preset, async (k, t) => {
     gs.fx = t ? clone(t.fx) : fxFromPreset(k); gs.fx.preset = k; migrateFx(gs.fx);
@@ -2088,11 +2092,11 @@ const GROUP_LINKS = {
   gv_glue: { lu: 0.8, reverb: 'plate', delay: '1/8', fb: 0.25, msg: '音量・リバーブ（プレート）も合わせました' },
   gv_front: { lu: 1.5, reverb: 'room', delay: '1/8', fb: 0.22, msg: '歌を前に出す音量・短めのリバーブにしました' },
   gv_shine: { lu: 1.0, reverb: 'hall', delay: '1/4', fb: 0.3, msg: '音量・広いリバーブ（ホール）も合わせました' },
-  gb_flat: { lu: 0.5, msg: '音源のエフェクトをなしにして音量を整えました' },
-  gb_space: { lu: 1.5, msg: '歌が聴こえやすい音量バランスにしました' },
-  gb_punch: { lu: 0, msg: '音源を少し大きめのバランスにしました' },
-  gb_band: { lu: -1.5, msg: 'バンドの迫力を活かすバランスにしました' },
-  gb_soft: { lu: 2.0, msg: '音源を控えめにしたバランスにしました' },
+  gb_flat: { duck: 0, lu: 0.5, msg: '音源のエフェクトをなしにして音量を整えました' },
+  gb_space: { duck: 2.5, lu: 1.5, msg: '歌が聴こえやすい音量バランスにしました' },
+  gb_punch: { duck: 1.5, lu: 0, msg: '音源を少し大きめのバランスにしました' },
+  gb_band: { duck: 1.5, lu: -1.5, msg: 'バンドの迫力を活かすバランスにしました' },
+  gb_soft: { duck: 2, lu: 2.0, msg: '音源を控えめにしたバランスにしました' },
   gm_flat: { limiter: true, mvol: 0, final: 'stream', msg: 'マスターを素通し・書き出しは配信向けにしました' },
   gm_natural: { limiter: true, mvol: 0, final: 'stream', msg: '書き出しを配信向け（-14）にしました' },
   gm_clear: { limiter: true, mvol: 0, final: 'stream', msg: '書き出しを配信向け（-14）にしました' },
@@ -2106,6 +2110,7 @@ async function applyGroupLink(key, presetId) {
   const G = project.groups;
   if (L.reverb) { project.bus.reverb.type = L.reverb; project.bus.delay.note = L.delay; project.bus.delay.feedback = L.fb; engine.updateBus(project); }
   if (key === 'master') { G.master.limiter = L.limiter; G.master.vol = L.mvol; project.exportFinal = L.final; }
+  if (L.duck != null) G.backing.duck = L.duck;
   if (L.lu != null) { await autoBalance(L.lu, true); G.balanceTpl = null; }
   toast(L.msg, 2200);
 }
@@ -2118,6 +2123,7 @@ function buildBalanceTab(body) {
     // also switch the vocal / backing group effects to match
     G.vocal.fx = fxFromPreset(t.gv); G.vocal.fx.preset = t.gv; migrateFx(G.vocal.fx);
     G.backing.fx = fxFromPreset(t.gb); G.backing.fx.preset = t.gb; migrateFx(G.backing.fx);
+    if (GROUP_LINKS[t.gb] && GROUP_LINKS[t.gb].duck != null) G.backing.duck = GROUP_LINKS[t.gb].duck;
     const L = GROUP_LINKS[t.gv];
     if (L && L.reverb) { project.bus.reverb.type = L.reverb; project.bus.delay.note = L.delay; project.bus.delay.feedback = L.fb; engine.updateBus(project); }
     engine.updateGroups(project);
@@ -2128,7 +2134,8 @@ function buildBalanceTab(body) {
   body.append(section('手動で調整', true,
     slider({ label: 'ボーカル類', min: -24, max: 12, step: 0.5, value: G.vocal.vol, fmt: fmtDb, oninput: (v) => { G.vocal.vol = v; G.balanceTpl = null; changed(); } }),
     slider({ label: '音源', min: -24, max: 12, step: 0.5, value: G.backing.vol, fmt: fmtDb, oninput: (v) => { G.backing.vol = v; G.balanceTpl = null; changed(); } }),
-    slider({ label: 'マスター', min: -12, max: 6, step: 0.5, value: G.master.vol, fmt: fmtDb, oninput: (v) => { G.master.vol = v; changed(); } })));
+    slider({ label: 'マスター', min: -12, max: 6, step: 0.5, value: G.master.vol, fmt: fmtDb, oninput: (v) => { G.master.vol = v; changed(); } }),
+    slider({ label: 'なじませ', min: 0, max: 6, step: 0.5, value: G.backing.duck || 0, fmt: (v) => v === 0 ? 'オフ' : v + ' dB', oninput: (v) => { G.backing.duck = v; saveProject(); }, onchange: () => { if (engine.playing) playFrom(engine.position, currentPlayFilter); } })));
 }
 // ---------------- mix rendering (書き出し・バランス・バックグラウンド再生) ----------------
 // The mix is calculated by our own code in the background worker, a few seconds at a time.
@@ -2355,7 +2362,13 @@ function buildCleanTab(body, tr) {
   body.append(switchRow('ノイズ・リップノイズを除去', c.on, (v) => { c.on = v; apply(); renderSheet(); }), info);
   if (!c.on) return;
   body.append(chips([[true, 'おまかせ'], [false, '手動']], c.auto, (v) => { c.auto = v; apply(); renderSheet(); }, 'accent'));
-  if (c.auto) return;
+  const clickFmt = (v) => v === 0 ? 'オフ' : v <= 0.5 ? '標準' + (v < 0.5 ? '（弱）' : '') : v <= 1 ? '強' : '最強';
+  if (c.auto) {
+    body.append(h('p', { class: 'note', style: 'margin:2px 0 6px' }, 'さらに抑えたいときは右へ。'),
+      slider({ label: 'ブレスを抑える', min: 0, max: 36, step: 1, value: c.autoBreath || 0, fmt: (v) => v === 0 ? 'そのまま' : '−' + v + ' dB', oninput: (v) => { c.autoBreath = v; }, onchange: apply }),
+      slider({ label: 'リップノイズ', min: 0, max: 1.3, step: 0.05, value: c.autoClick != null ? c.autoClick : 0.5, fmt: clickFmt, oninput: (v) => { c.autoClick = v; }, onchange: apply }));
+    return;
+  }
   body.append(section('環境ノイズ', true,
     slider({ label: '低減量', min: 0, max: 30, step: 1, value: c.reduceDb, fmt: (v) => v + ' dB', oninput: (v) => { c.reduceDb = v; }, onchange: apply }),
     slider({ label: '感度', min: 0, max: 1, step: 0.05, value: c.sens, fmt: fmtPct, oninput: (v) => { c.sens = v; }, onchange: apply }),
@@ -2368,8 +2381,8 @@ function buildCleanTab(body, tr) {
       } }, '再生位置で学習'),
       h('button', { onclick: () => { c.profile = null; apply(); renderSheet(); } }, '自動に戻す'))));
   body.append(section('リップノイズ・ブレス', true,
-    slider({ label: 'リップノイズ', min: 0, max: 1, step: 0.05, value: c.click, fmt: (v) => v === 0 ? 'オフ' : fmtPct(v), oninput: (v) => { c.click = v; }, onchange: apply }),
-    slider({ label: 'ブレス', min: 0, max: 24, step: 1, value: c.breath, fmt: (v) => v === 0 ? 'そのまま' : '−' + v + ' dB', oninput: (v) => { c.breath = v; }, onchange: apply })));
+    slider({ label: 'リップノイズ', min: 0, max: 1.3, step: 0.05, value: c.click, fmt: clickFmt, oninput: (v) => { c.click = v; }, onchange: apply }),
+    slider({ label: 'ブレス', min: 0, max: 36, step: 1, value: c.breath, fmt: (v) => v === 0 ? 'そのまま' : '−' + v + ' dB', oninput: (v) => { c.breath = v; }, onchange: apply })));
 }
 
 // ---------- pitch tab ----------
@@ -2646,13 +2659,15 @@ function editMemo() {
 // ---------------- auto MIX ----------------
 // Style templates modelled on common 歌ってみた / VTuber mix tendencies (no specific artist).
 const AUTO_MIX = {
-  vtuber: { name: 'VTuber王道', desc: 'キラキラ明るく、歌が主役', main: 'vtuber', harm: 'harm_bright', back: 'b_space', gv: 'gv_front', gb: 'gb_space', gm: 'gm_loud', reverb: 'plate', delay: '1/8', fb: 0.3, pp: true, center: 0.85, drift: 0.3, lu: 1.5, harmony: true },
-  idol: { name: 'かわいいアイドル', desc: '軽やかで華やかなハモリ', main: 'kawaii', harm: 'harm_wide', back: 'b_bright', gv: 'gv_shine', gb: 'gb_space', gm: 'gm_clear', reverb: 'plate', delay: '1/8.', fb: 0.3, pp: true, center: 0.9, drift: 0.35, lu: 1.5, harmony: true },
-  rock: { name: '歌い手ロック', desc: '芯のある力強い声とバンド感', main: 'rock', harm: 'harmony', back: 'b_glue', gv: 'gv_glue', gb: 'gb_punch', gm: 'gm_loud', reverb: 'room', delay: '1/4', fb: 0.25, pp: false, center: 0.75, drift: 0.2, lu: -0.5, harmony: false },
-  ballad: { name: 'しっとりバラード', desc: '広い響きで柔らかく', main: 'ballad', harm: 'harm_far', back: 'b_flat', gv: 'gv_shine', gb: 'gb_soft', gm: 'gm_natural', reverb: 'hall', delay: '1/4', fb: 0.35, pp: false, center: 0.75, drift: 0.2, lu: 0.8, harmony: false },
-  natural: { name: 'ナチュラル', desc: '生っぽさを残して整える', main: 'natural', harm: 'harmony', back: 'b_space', gv: 'gv_glue', gb: 'gb_flat', gm: 'gm_natural', reverb: 'room', delay: '1/8', fb: 0.2, pp: false, center: 0.6, drift: 0.15, lu: 0.5, harmony: false },
-  band: { name: 'バンド歌ってみた', desc: 'バンド音源に負けない太い歌', main: 'band', harm: 'harmony', back: 'b_band', gv: 'gv_front', gb: 'gb_band', gm: 'gm_video', reverb: 'room', delay: '1/8', fb: 0.22, pp: false, center: 0.75, drift: 0.2, lu: 0.5, harmony: false },
-  edm: { name: 'ボカロ・EDM', desc: 'ケロケロ系オートチューン', main: 'vtuber', harm: 'harm_wide', back: 'b_bright', gv: 'gv_front', gb: 'gb_punch', gm: 'gm_loud', reverb: 'plate', delay: '1/16', fb: 0.35, pp: true, center: 1, drift: 0.5, tune: { speedMs: 0, strength: 1 }, lu: 0.5, harmony: false },
+  power: { name: 'ハイトーン歌い手', desc: '張りのある高音を前に出し、音源となじませる', main: 'power', harm: 'harm_bright', back: 'b_space', gv: 'gv_front', gb: 'gb_space', gm: 'gm_video', reverb: 'plate', delay: '1/8.', fb: 0.3, pp: true, center: 0.85, drift: 0.3, lu: 1.8, harmony: true, duck: 3 },
+  airy: { name: '透明感・エモ歌い手', desc: '広い響きと空気感、繊細なハモリ', main: 'airy', harm: 'harm_wide', back: 'b_space', gv: 'gv_shine', gb: 'gb_space', gm: 'gm_video', reverb: 'hall', delay: '1/4', fb: 0.32, pp: true, center: 0.85, drift: 0.3, lu: 1.5, harmony: true, duck: 2.5 },
+  vtuber: { name: 'VTuber王道', desc: 'キラキラ明るく、歌が主役', main: 'vtuber', harm: 'harm_bright', back: 'b_space', gv: 'gv_front', gb: 'gb_space', gm: 'gm_loud', reverb: 'plate', delay: '1/8', fb: 0.3, pp: true, center: 0.85, drift: 0.3, lu: 1.5, harmony: true, duck: 2.5 },
+  idol: { name: 'かわいいアイドル', desc: '軽やかで華やかなハモリ', main: 'kawaii', harm: 'harm_wide', back: 'b_bright', gv: 'gv_shine', gb: 'gb_space', gm: 'gm_clear', reverb: 'plate', delay: '1/8.', fb: 0.3, pp: true, center: 0.9, drift: 0.35, lu: 1.5, harmony: true, duck: 2 },
+  rock: { name: '歌い手ロック', desc: '芯のある力強い声とバンド感', main: 'rock', harm: 'harmony', back: 'b_glue', gv: 'gv_glue', gb: 'gb_punch', gm: 'gm_loud', reverb: 'room', delay: '1/4', fb: 0.25, pp: false, center: 0.75, drift: 0.2, lu: -0.5, harmony: false, duck: 1.5 },
+  ballad: { name: 'しっとりバラード', desc: '広い響きで柔らかく', main: 'ballad', harm: 'harm_far', back: 'b_flat', gv: 'gv_shine', gb: 'gb_soft', gm: 'gm_natural', reverb: 'hall', delay: '1/4', fb: 0.35, pp: false, center: 0.75, drift: 0.2, lu: 0.8, harmony: false, duck: 2 },
+  natural: { name: 'ナチュラル', desc: '生っぽさを残して整える', main: 'natural', harm: 'harmony', back: 'b_space', gv: 'gv_glue', gb: 'gb_flat', gm: 'gm_natural', reverb: 'room', delay: '1/8', fb: 0.2, pp: false, center: 0.6, drift: 0.15, lu: 0.5, harmony: false, duck: 1.5 },
+  band: { name: 'バンド歌ってみた', desc: 'バンド音源に負けない太い歌', main: 'band', harm: 'harmony', back: 'b_band', gv: 'gv_front', gb: 'gb_band', gm: 'gm_video', reverb: 'room', delay: '1/8', fb: 0.22, pp: false, center: 0.75, drift: 0.2, lu: 0.5, harmony: false, duck: 1.5 },
+  edm: { name: 'ボカロ・EDM', desc: 'ケロケロ系オートチューン', main: 'vtuber', harm: 'harm_wide', back: 'b_bright', gv: 'gv_front', gb: 'gb_punch', gm: 'gm_loud', reverb: 'plate', delay: '1/16', fb: 0.35, pp: true, center: 1, drift: 0.5, tune: { speedMs: 0, strength: 1 }, lu: 0.5, harmony: false, duck: 2 },
 };
 // ---- auto MIX with live preview: tap a style → hear it → 確定 で本番の処理 ----
 function mixSnapshot() {
@@ -2673,7 +2688,7 @@ async function applyMixPreview(key, sn) {
   }
   project.tracks.filter((t) => t.kind === 'harmony').forEach((t, i) => { t.pan = i % 2 ? 0.35 : -0.35; t.vol = -6; });
   const G = project.groups;
-  G.vocal.fx = fxFromPreset(tpl.gv); G.backing.fx = fxFromPreset(tpl.gb); G.master.fx = fxFromPreset(tpl.gm); G.master.limiter = true; G.master.vol = 0;
+  G.vocal.fx = fxFromPreset(tpl.gv); G.backing.fx = fxFromPreset(tpl.gb); G.master.fx = fxFromPreset(tpl.gm); G.master.limiter = true; G.master.vol = 0; G.backing.duck = tpl.duck || 0;
   project.bus.reverb.type = tpl.reverb; project.bus.delay.note = tpl.delay; project.bus.delay.feedback = tpl.fb; project.bus.delay.pingpong = tpl.pp;
   const hasB = project.tracks.some((t) => t.kind === 'backing' && t.audioId && !t.mute);
   if (hasB) {
@@ -2773,7 +2788,7 @@ async function runAutoMix(key, opt) {
     // harmonies: spread left / right
     project.tracks.filter((t) => t.kind === 'harmony').forEach((t, i) => { t.pan = i % 2 ? 0.35 : -0.35; t.vol = -6; });
     const G = project.groups;
-    G.vocal.fx = fxFromPreset(tpl.gv); G.backing.fx = fxFromPreset(tpl.gb); G.master.fx = fxFromPreset(tpl.gm); G.master.limiter = true; G.master.vol = 0;
+    G.vocal.fx = fxFromPreset(tpl.gv); G.backing.fx = fxFromPreset(tpl.gb); G.master.fx = fxFromPreset(tpl.gm); G.master.limiter = true; G.master.vol = 0; G.backing.duck = tpl.duck || 0;
     project.bus.reverb.type = tpl.reverb; project.bus.delay.note = tpl.delay; project.bus.delay.feedback = tpl.fb; project.bus.delay.pingpong = tpl.pp;
     done.push('エフェクト');
     for (let i = 0; i < project.tracks.length; i++) {
