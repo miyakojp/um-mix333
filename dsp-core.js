@@ -729,6 +729,42 @@
     };
   }
   DSP.makeFFT = makeFFT;
+  // WAV writer in small parts (no single huge allocation)
+  DSP.encodeWav = function encodeWav(channels, sampleRate, bits) {
+    const nCh = channels.length, n = channels[0].length;
+    const bps = bits / 8;
+    const dataLen = n * nCh * bps;
+    const hdr = new ArrayBuffer(44);
+    const v = new DataView(hdr);
+    const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    ws(0, 'RIFF'); v.setUint32(4, 36 + dataLen, true); ws(8, 'WAVE');
+    ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, nCh, true);
+    v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * nCh * bps, true);
+    v.setUint16(32, nCh * bps, true); v.setUint16(34, bits, true);
+    ws(36, 'data'); v.setUint32(40, dataLen, true);
+    const parts = [hdr];
+    const CH = 131072;
+    for (let s0 = 0; s0 < n; s0 += CH) {
+      const m = Math.min(CH, n - s0);
+      const u8 = new Uint8Array(m * nCh * bps);
+      let o = 0;
+      if (bits === 16) {
+        for (let i = s0; i < s0 + m; i++) for (let c = 0; c < nCh; c++) {
+          const s = Math.max(-1, Math.min(1, channels[c][i] + (Math.random() - Math.random()) / 32768));
+          const iv = s < 0 ? Math.round(s * 32768) : Math.round(s * 32767);
+          u8[o++] = iv & 255; u8[o++] = (iv >> 8) & 255;
+        }
+      } else {
+        for (let i = s0; i < s0 + m; i++) for (let c = 0; c < nCh; c++) {
+          const s = Math.max(-1, Math.min(1, channels[c][i]));
+          const iv = Math.round(s < 0 ? s * 8388608 : s * 8388607);
+          u8[o++] = iv & 255; u8[o++] = (iv >> 8) & 255; u8[o++] = (iv >> 16) & 255;
+        }
+      }
+      parts.push(u8);
+    }
+    return new Blob(parts, { type: 'audio/wav' });
+  };
 
   function biquadCoefs(type, f0, sr, q, gainDb) {
     const w = 2 * Math.PI * f0 / sr, cs = Math.cos(w), sn = Math.sin(w), al = sn / (2 * q);

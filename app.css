@@ -314,3 +314,7 @@ select.key-select { width: 72px; height: 32px; padding: 0 8px; font-size: 15px; 
   .pe-tools { gap: 5px; }
 }
 .transport #btnRec.wait, #btnRec.wait { opacity: .5; }
+.howto { margin: 4px 0 10px; padding-left: 4px; list-style: none; font-size: 12.5px; line-height: 1.65; color: var(--text); }
+.howto li { margin-bottom: 7px; }
+.howto b { color: var(--gold); }
+pre.tree { background: var(--panel3); border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.5; color: var(--mint); white-space: pre; overflow-x: auto; margin: 6px 0 10px; }

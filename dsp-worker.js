@@ -1,6 +1,7 @@
 /* UtaMix DSP worker: heavy audio processing off the UI thread. No network access is used. */
 'use strict';
-importScripts('dsp-core.js');
+importScripts('dsp-core.js', 'mix-core.js');
+let mixer = null;
 
 const store = new Map(); // id -> {sr, chs, data (mono), an, marks, chroma, clean: {key, y, info}, keyshift: Map}
 
@@ -114,6 +115,42 @@ self.onmessage = (ev) => {
       }
       case 'loudness': {
         reply({ ok: true, lufs: DSP.loudness(msg.chs, msg.sr) });
+        break;
+      }
+      // ---- mix renderer (書き出し・バランス・バックグラウンド再生) ----
+      case 'mixBegin': {
+        mixer = new MIX.Mixer(msg.cfg);
+        reply({ ok: true });
+        break;
+      }
+      case 'mixChunk': {
+        if (!mixer) throw new Error('mixer not started');
+        mixer.chunk(msg.srcs, msg.len);
+        reply({ ok: true });
+        break;
+      }
+      case 'mixEnd': {
+        if (!mixer) throw new Error('mixer not started');
+        const m = mixer; mixer = null;
+        let L = m.L, R = m.R;
+        const sr = m.sr;
+        if (msg.mode === 'measure') { reply({ ok: true, lufs: DSP.loudness([L, R], sr) }); break; }
+        let last = L.length - 1;
+        const spanN = Math.round((msg.span || 0) * sr);
+        while (last > spanN && Math.abs(L[last]) < 1e-4 && Math.abs(R[last]) < 1e-4) last--;
+        L = L.subarray(0, last + 1); R = R.subarray(0, last + 1);
+        let before = null, gainDb = 0;
+        if (msg.target != null) { before = DSP.loudness([L, R], sr); if (isFinite(before)) gainDb = Math.max(-20, Math.min(24, msg.target - before)); }
+        prog(0.3);
+        DSP.limit([L, R], sr, msg.ceil != null ? msg.ceil : -1, gainDb);
+        prog(0.6);
+        const blob = DSP.encodeWav([L, R], sr, msg.bits || 24);
+        reply({ ok: true, blob, before, samples: L.length, sr });
+        break;
+      }
+      case 'dropAll': {
+        store.clear();
+        reply({ ok: true });
         break;
       }
       case 'finalize': {

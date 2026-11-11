@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
-import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, renderMix, encodeWav, EQ_LABELS, DEFAULT_PRESET } from './audio-engine.js';
-export const APP_VERSION = 'v7';
+import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET } from './audio-engine.js';
+export const APP_VERSION = 'v9';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -1334,9 +1334,12 @@ async function bgStart() {
     if (bg.rev !== project.rev || !bg.url) {
       for (const tr of project.tracks) if (needsProcessing(tr) && !processed.has(tr.id)) { busy('準備中…'); await processTrack(tr); }
       busy('バックグラウンド再生の準備中…', 0);
-      const out = await renderMix(project, bufferFor, engine.ensure().sampleRate, (t) => !t.mute && (!project.tracks.some((x) => x.solo) || t.solo), (p) => busy('バックグラウンド再生の準備中…', p));
+      await freeWorkerMemory();
+      const res = await renderJS((t) => !t.mute && (!project.tracks.some((x) => x.solo) || t.solo), {
+        sr: engine.ensure().sampleRate, end: { mode: 'file', target: null, ceil: -1, bits: 16 },
+        onProgress: (p) => busy('バックグラウンド再生の準備中…', p * 0.9) });
       if (bg.url) URL.revokeObjectURL(bg.url);
-      bg.url = URL.createObjectURL(encodeWav([out.L, out.R], out.sampleRate, 16));
+      bg.url = URL.createObjectURL(res.blob);
       bg.rev = project.rev;
     }
     busy(false);
@@ -1969,6 +1972,79 @@ function buildBalanceTab(body) {
     slider({ label: '音源', min: -24, max: 12, step: 0.5, value: G.backing.vol, fmt: fmtDb, oninput: (v) => { G.backing.vol = v; G.balanceTpl = null; changed(); } }),
     slider({ label: 'マスター', min: -12, max: 6, step: 0.5, value: G.master.vol, fmt: fmtDb, oninput: (v) => { G.master.vol = v; changed(); } })));
 }
+// ---------------- mix rendering (書き出し・バランス・バックグラウンド再生) ----------------
+// The mix is calculated by our own code in the background worker, a few seconds at a time.
+// (The browser's built-in offline renderer can freeze or crash on iPhone.) The screen stays responsive.
+function sourceSlice(tr, buf, T0, len, sr) {
+  const nch = buf.numberOfChannels > 1 ? 2 : 1;
+  const data = [buf.getChannelData(0), nch > 1 ? buf.getChannelData(1) : null];
+  const clips = tr.clips && tr.clips.length ? tr.clips : [{ at: tr.offset || 0, a: 0, b: buf.duration }];
+  let tS = Infinity, tE = -Infinity;
+  for (const c of clips) { tS = Math.min(tS, c.at); tE = Math.max(tE, c.at + (Math.min(c.b, buf.duration) - c.a)); }
+  const fi = (tr.fade && tr.fade.in) || 0, fo = (tr.fade && tr.fade.out) || 0, edge = 0.004;
+  const T1 = T0 + len / sr, bsr = buf.sampleRate;
+  let out = null;
+  for (const c of clips) {
+    const b = Math.min(c.b, buf.duration);
+    if (b - c.a < 0.005) continue;
+    const cs = c.at, ce = c.at + (b - c.a);
+    if (ce <= T0 || cs >= T1) continue;
+    if (!out) { out = []; for (let k = 0; k < nch; k++) out.push(new Float32Array(len)); }
+    const i0 = Math.max(0, Math.ceil((cs - T0) * sr)), i1 = Math.min(len, Math.ceil((ce - T0) * sr));
+    for (let k = 0; k < nch; k++) {
+      const d = data[k], o = out[k], dl = d.length - 1;
+      for (let i = i0; i < i1; i++) {
+        const T = T0 + i / sr;
+        let env = Math.min(1, (T - cs) / edge, (ce - T) / edge);
+        if (fi > 0) env = Math.min(env, (T - tS) / fi);
+        if (fo > 0) env = Math.min(env, (tE - T) / fo);
+        if (env <= 0) continue;
+        const p = (c.a + (T - cs)) * bsr, j = Math.floor(p);
+        if (j < 0 || j >= dl) continue;
+        const f = p - j;
+        o[i] += (d[j] + (d[j + 1] - d[j]) * f) * env;
+      }
+    }
+  }
+  return out;
+}
+// opts: {sr, from, maxSec, noTail, groups, end:{mode:'measure'|'file', target, ceil, bits}, onProgress}
+async function renderJS(include, opts) {
+  const sr = opts.sr;
+  const tracks = project.tracks.filter((t) => include(t) && bufferFor(t));
+  let end = 0;
+  for (const t of tracks) { const b = bufferFor(t); for (const c of (t.clips && t.clips.length ? t.clips : [{ at: t.offset || 0, a: 0, b: b.duration }])) end = Math.max(end, c.at + (Math.min(c.b, b.duration) - c.a)); }
+  if (end <= 0) throw new Error('書き出す音がありません');
+  const from = Math.max(0, Math.min(opts.from || 0, end - 1));
+  let span = end - from;
+  if (opts.maxSec) span = Math.min(span, opts.maxSec);
+  const tail = opts.noTail ? 0.2 : 3.0;
+  const B = 4096, total = Math.ceil((span + tail) * sr / B) * B;
+  const cfg = {
+    sr, total,
+    tracks: tracks.map((t) => ({ id: t.id, kind: t.kind, nch: bufferFor(t).numberOfChannels > 1 ? 2 : 1, fx: t.fx, vol: t.vol || 0, pan: t.pan || 0, clipGain: t.clipGain || 0 })),
+    groups: opts.groups || project.groups, bus: project.bus,
+  };
+  await rpc({ type: 'mixBegin', cfg: JSON.parse(JSON.stringify(cfg)) });
+  const CH = B * 24, t0 = performance.now();
+  for (let s0 = 0; s0 < total; s0 += CH) {
+    const len = Math.min(CH, total - s0);
+    const srcs = {}, transfer = [];
+    for (const t of tracks) {
+      const chs = sourceSlice(t, bufferFor(t), from + s0 / sr, len, sr);
+      if (chs) { srcs[t.id] = chs; for (const c of chs) transfer.push(c.buffer); }
+    }
+    await rpc({ type: 'mixChunk', srcs, len }, null, transfer);
+    if (opts.onProgress) opts.onProgress((s0 + len) / total, (performance.now() - t0) / 1000);
+  }
+  return rpc(Object.assign({ type: 'mixEnd', span }, opts.end || { mode: 'measure' }), opts.onFinish || null);
+}
+// free the big audio copies the worker keeps for pitch/noise processing (they are reloaded when needed)
+async function freeWorkerMemory() {
+  try { await rpc({ type: 'dropAll' }); } catch (e) { /* ignore */ }
+  workerAudio.clear(); workerAnalysis.clear();
+}
+
 // Quick loudness estimate of a group, computed in plain JS on a 30 s window (no offline audio render,
 // so it is instant and never blocks the iPhone). It models the parts of the effect chain that change
 // loudness: high-pass, EQ, compressor (incl. the automatic make-up gain of the Web Audio compressor) and gains.
@@ -2010,20 +2086,18 @@ function fxModel(chs, sr, fx, gainDb) {
     if (g !== 1) for (let i = 0; i < x.length; i++) x[i] *= g;
   }
 }
-// accurate measurement: a short offline render through the real effects (12 s, low sample rate).
-// If the iPhone takes too long or fails, fall back to the instant JS model so nothing ever freezes.
+// accurate measurement through the same effect chain as playback (20 s, low sample rate, in the worker).
+// If anything goes wrong, fall back to the instant JS model so nothing ever freezes.
 async function measureGroup(include, from, maxSec = 20) {
   try {
-    const proj = Object.assign({}, project, { groups: clone(project.groups) });
-    proj.groups.vocal.vol = 0; proj.groups.backing.vol = 0; proj.groups.master.limiter = false;
-    const sr = 16000;
-    const out = await Promise.race([
-      renderMix(proj, bufferFor, sr, include, null, { noTail: true, from, maxSec }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000)),
+    const groups = clone(project.groups);
+    groups.vocal.vol = 0; groups.backing.vol = 0; groups.master.limiter = false;
+    const r = await Promise.race([
+      renderJS(include, { sr: 16000, from, maxSec, noTail: true, groups, end: { mode: 'measure' } }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 15000)),
     ]);
-    const v = DSP.loudness([out.L, out.R], sr);
-    if (isFinite(v)) return v;
-  } catch (e) { /* use the model below */ }
+    if (r && isFinite(r.lufs)) return r.lufs;
+  } catch (e) { console.warn(e); }
   return measureGroupModel(include, from, 30);
 }
 async function measureGroupModel(include, from, maxSec = 30) {
@@ -2541,6 +2615,7 @@ async function runAutoMix(key, opt) {
     G.balanceTpl = null;
     done.push('バランス');
     project.lastAutoMix = key;
+    freeWorkerMemory();
     project.exportFinal = tpl.gm === 'gm_video' ? 'video' : 'stream';
     busy(false);
     saveProject(); refreshStudio();
@@ -2597,24 +2672,20 @@ async function doExport(st) {
   try {
     const sr = st.final === 'cd' ? 44100 : live.sampleRate;
     const bits = st.final === 'cd' ? 16 : st.bits;
-    const out = await renderMix(project, bufferFor, sr, include, (p, sec) => busy(`書き出し中… ${Math.round(p * 100)}%（${Math.round(sec || 0)}秒）`, p * 0.85), { segment: 30 });
-    const L = out.L, R = out.R;
+    await freeWorkerMemory();
     const target = fin.target;
-    busy('音量を仕上げ中…', 0.85);
-    await new Promise((r) => setTimeout(r, 30));
-    let before = null, gainDb = 0;
-    if (target != null) { before = DSP.loudness([L, R], sr); gainDb = Math.max(-20, Math.min(24, target - before)); }
-    busy('音量を仕上げ中…', 0.9);
-    await new Promise((r) => setTimeout(r, 30));
-    DSP.limit([L, R], sr, fin.ceil, gainDb);
-    busy('ファイルを作成中…', 0.96);
-    await new Promise((r) => setTimeout(r, 30));
-    const blob = encodeWav([L, R], sr, bits);
+    const res = await renderJS(include, {
+      sr, end: { mode: 'file', target, ceil: fin.ceil, bits },
+      onProgress: (p, sec) => busy(`書き出し中… ${Math.round(p * 100)}%（${Math.round(sec || 0)}秒）`, p * 0.85),
+      onFinish: (p) => busy('音量を仕上げてファイルを作成中…', 0.85 + p * 0.15),
+    });
+    const blob = res.blob, before = res.before;
     busy(false);
     try { live.resume(); } catch (e) { /* ignore */ }
-    const suffix = { mix: '', main: '_main', harm: '_harmony', vox: '_vocals', back: '_backing', sel: '_' + (sel ? sel.name : '') }[st.what];
-    offerFile(blob, safeName(project.name + suffix) + '.wav', '書き出しが完了しました',
-      `${fmtTime(L.length / sr)} · ${(blob.size / 1048576).toFixed(1)} MB` + (before != null ? ` · ${before.toFixed(1)} → ${target} LUFS` : ''));
+    // 「曲名__mix.wav」: the part before "__" tells the iPhone shortcut which project folder to use
+    const suffix = '__' + { mix: 'mix', main: 'main', harm: 'harmony', vox: 'vocals', back: 'backing', sel: (sel ? sel.name : 'track') }[st.what];
+    offerFile(blob, safeName(project.name).replace(/__+/g, '_') + safeName(suffix) + '.wav', '書き出しが完了しました',
+      `${fmtTime(res.samples / sr)} · ${(blob.size / 1048576).toFixed(1)} MB` + (before != null && isFinite(before) ? ` · ${before.toFixed(1)} → ${target} LUFS` : ''));
   } catch (e) { busy(false); try { live.resume(); } catch (e2) { /* ignore */ } console.error(e); infoModal('書き出しに失敗しました', String(e.message || e)); }
 }
 function safeName(s) { return s.replace(/[\\/:*?"<>|]/g, '_').slice(0, 60) || 'utamix'; }
@@ -2636,7 +2707,7 @@ function offerFile(blob, filename, title, sub) {
     c.append(h('h3', {}, title), h('p', {}, filename + (sub ? ' · ' + sub : '')),
       h('div', { class: 'actions' },
         h('button', { class: 'big-btn primary', onclick: share }, canShare ? '⇪ 共有（保存・送信）' : 'ダウンロード'),
-        h('p', { class: 'note', style: 'margin:0' }, canShare ? '共有メニューから「“ファイル”に保存」・LINE・AirDrop などを選べます。' : ''),
+        h('p', { class: 'note', style: 'margin:0' }, canShare ? (settings.filesShortcut ? '共有メニューで「UtaMixに保存」を選ぶと、ファイルAppの UtaMix フォルダに自動で入ります。' : '共有メニューから「“ファイル”に保存」・LINE・AirDrop などを選べます。（⋯ →「ファイルAppに自動保存」を設定すると、フォルダ分けして自動で入ります）') : ''),
         canShare ? h('button', { class: 'big-btn ghost', onclick: download }, 'ダウンロードとして保存') : null,
         h('button', { class: 'big-btn ghost', onclick: close }, '閉じる')));
   }, { sticky: true });
@@ -2678,8 +2749,8 @@ async function exportAllBackup(list) {
   } catch (e) { busy(false); infoModal('バックアップに失敗しました', String(e.message || e)); }
 }
 
-async function exportBackup(p) {
-  busy('バックアップを作成中…');
+async function exportBackup(p, asSave) {
+  busy(asSave ? 'プロジェクトファイルを作成中…' : 'バックアップを作成中…');
   try {
     const audios = [], parts = [];
     for (const id of new Set(p.tracks.map((t) => t.audioId).filter(Boolean))) {
@@ -2698,7 +2769,7 @@ async function exportBackup(p) {
     dv.setUint32(12, pad, true);
     const blob = new Blob([pre, header, new Uint8Array(pad), ...parts], { type: 'application/octet-stream' });
     busy(false);
-    offerFile(blob, safeName(p.name) + '.utamix', 'バックアップを作成しました', `${(blob.size / 1048576).toFixed(1)} MB`);
+    offerFile(blob, safeName(p.name).replace(/__+/g, '_') + '.utamix', asSave ? 'プロジェクトを保存しました' : 'バックアップを作成しました', `${(blob.size / 1048576).toFixed(1)} MB`);
   } catch (e) { busy(false); infoModal('バックアップに失敗しました', String(e.message || e)); }
 }
 async function importBackup(file) {
@@ -2740,12 +2811,42 @@ function studioMenu() {
       h('button', { class: 'big-btn', onclick: async () => { close(); const n = await promptModal('別名で保存', project.name + ' のコピー', '保存'); if (!n) return; await flushSave(); const np = await duplicateProject(project, n); if (np) openProject(np.id); } }, '別名で保存'),
       h('button', { class: 'big-btn', onclick: async () => { close(); const n = await promptModal('プロジェクト名', project.name); if (n) { project.name = n; saveProject(); refreshStudio(); } } }, '名前を変更'),
       h('button', { class: 'big-btn', onclick: () => { close(); recordSettings(); } }, '録音の設定'),
+      h('button', { class: 'big-btn', onclick: () => { close(); filesSaveSheet(); } }, 'ファイルAppに自動保存'),
       h('button', { class: 'big-btn', onclick: () => { close(); if (bg.playing) bgStop(); else bgStart(); } }, bg.playing ? 'バックグラウンド再生を止める' : 'バックグラウンド再生（画面オフで聴く）'),
       h('button', { class: 'big-btn', onclick: async () => { close(); await flushSave(); exportBackup(project); } }, 'バックアップファイルを保存'),
       h('button', { class: 'big-btn', onclick: () => { close(); aboutModal(); } }, '使い方・安全性'),
       h('button', { class: 'big-btn ghost', onclick: close }, '閉じる')));
   });
 }
+// ---- saving into the iPhone Files app (via an iPhone Shortcut, since web apps cannot write there by themselves) ----
+function filesSaveSheet() {
+  openModal((c, close) => {
+    const render = () => {
+      c.innerHTML = '';
+      const step = (n, t) => h('li', {}, h('b', {}, n + '. '), t);
+      c.append(h('h3', {}, 'ファイルAppに自動保存'),
+        h('p', {}, '保存（✓）や書き出しのあとに出る共有メニューで「UtaMixに保存」を選ぶと、ファイルAppにフォルダが自動で作られて、その中に入ります。'),
+        h('pre', { class: 'tree' }, 'UtaMix/\n └ 曲名/\n    ├ 曲名.utamix   ← プロジェクト\n    └ Output/\n       ├ 曲名__mix.wav ← 書き出し\n       └ 曲名__vocals.wav'),
+        switchRow('✓ でプロジェクトファイルも作る', !!settings.filesSave, (v) => { settings.filesSave = v; saveSettings(); }),
+        switchRow('ショートカットを作った', !!settings.filesShortcut, (v) => { settings.filesShortcut = v; saveSettings(); }),
+        h('div', { class: 'lbl-line' }, 'ショートカットの作り方（最初に1回だけ）'),
+        h('ol', { class: 'howto' },
+          step(1, '「ショートカット」Appを開き、右上の「＋」→ 名前を「UtaMixに保存」にする'),
+          step(2, '下の「ⓘ（詳細）」→「共有シートに表示」をオン。受け取る種類は「ファイル」だけにする'),
+          step(3, 'アクション「ファイルの詳細を取得」→「名前」を「ショートカットの入力」から取得'),
+          step(4, 'アクション「テキストを分割」→ 3の「名前」を、区切り「カスタム」で __（アンダーバー2つ）で分割'),
+          step(5, 'アクション「リストから項目を取得」→「最初の項目」（これが曲名）'),
+          step(6, 'アクション「ファイルの詳細を取得」→「ファイル拡張子」を「ショートカットの入力」から取得'),
+          step(7, 'アクション「if」→ 6の「ファイル拡張子」が「wav」と等しい場合：「テキスト」に UtaMix/［5の項目］/Output/ 、「その他の場合」：「テキスト」に UtaMix/［5の項目］/'),
+          step(8, 'アクション「フォルダを作成」→ 場所は「iCloud Drive」（または「このiPhone内」）、パスに 7の「if の結果」'),
+          step(9, 'アクション「ファイルを保存」→「ショートカットの入力」を保存。「保存先を尋ねる」はオフ、保存先は8と同じ場所、サブパスに 7の「if の結果」、「上書き」はオン')),
+        h('p', { class: 'note' }, 'iPhoneのWebアプリは、ファイルAppに勝手にフォルダを作ることがOSの仕組み上できません。そのため、iPhone標準の「ショートカット」に保存をおまかせします。共有メニューで1回タップするだけで、毎回同じ場所に整理して入ります。'),
+        h('div', { class: 'actions' }, h('button', { class: 'big-btn ghost', onclick: close }, '閉じる')));
+    };
+    render();
+  });
+}
+
 function recordSettings() {
   openModal((c, close) => {
     const render = () => {
@@ -2881,7 +2982,11 @@ $('btnImportBackup').onclick = () => $('fileBackup').click();
 $('btnAbout').onclick = aboutModal;
 $('btnBack').onclick = () => showHome();
 $('projName').onclick = async () => { const n = await promptModal('プロジェクト名', project.name); if (n) { project.name = n; saveProject(); refreshStudio(); } };
-$('btnSave').onclick = async () => { await flushSave(); toast('保存しました'); };
+$('btnSave').onclick = async () => {
+  await flushSave();
+  if (settings.filesSave) exportBackup(project, true);
+  else toast('保存しました');
+};
 $('btnUndo').onclick = () => { if (!rec.active) undo(); };
 $('btnRedo').onclick = () => { if (!rec.active) redo(); };
 $('btnFollow').onclick = () => { settings.follow = settings.follow === false; saveSettings(); refreshHead(); toast(settings.follow ? '再生位置を自動で追いかけます' : '自動追尾をオフにしました', 1400); };
