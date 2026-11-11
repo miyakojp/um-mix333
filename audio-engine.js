@@ -234,7 +234,8 @@ class Strip {
     this.dsHi2.connect(this.dsAbs); this.dsAbs.connect(this.dsEnv); this.dsEnv.connect(this.dsMap); this.dsMap.connect(this.dsHiGain.gain);
     this.makeup.connect(this.satDry); this.sat.connect(this.satWet);
     this.satDry.connect(this.satOut);
-    this.satOut.connect(this.colDry); this.colDry.connect(this.fader);
+    this.autoDry = g();
+    this.satOut.connect(this.colDry); this.colDry.connect(this.autoDry); this.autoDry.connect(this.fader);
     this.colHp.connect(this.colLp); this.colLp.connect(this.colShape);
     this.colShape.connect(this.ring); this.ring.connect(this.colWet);
     this.fader.connect(this.mute);
@@ -355,6 +356,41 @@ class Strip {
   }
 
   setAudible(on) { this.mute.gain.setTargetAtTime(on ? 1 : 0, this.ctx.currentTime, 0.01); }
+  // per-clip effects ("部分エフェクト"): extra nodes whose values follow a time curve
+  applyAuto(plan, sends, when, from) {
+    if (!plan) return;
+    const ctx = this.ctx, g = () => ctx.createGain();
+    const sched = (param, keys) => {
+      const at = (T) => when + (T - from);
+      const v0 = curveAt(keys, from);
+      try { param.cancelScheduledValues(0); } catch (e) { /* ignore */ }
+      param.value = v0; param.setValueAtTime(v0, when);
+      for (const [T, v] of keys) if (T > from) param.linearRampToValueAtTime(v, at(T));
+    };
+    if (plan.lp || plan.vol) {
+      this.fader.disconnect(this.mute);
+      let n = this.fader;
+      if (plan.lp) { this.autoLp = ctx.createBiquadFilter(); this.autoLp.type = 'lowpass'; this.autoLp.Q.value = 0.7; n.connect(this.autoLp); n = this.autoLp; sched(this.autoLp.frequency, plan.lp.map(([t, v]) => [t, Math.min(v, ctx.sampleRate / 2)])); }
+      if (plan.vol) { this.autoVol = g(); n.connect(this.autoVol); n = this.autoVol; sched(this.autoVol.gain, plan.vol); }
+      n.connect(this.mute);
+    }
+    if (sends && plan.rev) { this.autoRev = g(); this.mute.connect(this.autoRev); this.autoRev.connect(sends.revIn); sched(this.autoRev.gain, plan.rev); }
+    if (sends && plan.dly) { this.autoDly = g(); this.mute.connect(this.autoDly); this.autoDly.connect(sends.dlyIn); sched(this.autoDly.gain, plan.dly); }
+    if (plan.dry) sched(this.autoDry.gain, plan.dry);
+    for (const [type, keys] of Object.entries(plan.col || {})) {
+      const ct = COLOR_TYPES[type]; if (!ct) continue;
+      const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = ct.hp; hp.Q.value = ct.q;
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = ct.lp; lp.Q.value = ct.q;
+      const sh = ctx.createWaveShaper(); sh.curve = satCurve(ct.drive, ct.bits);
+      const ring = g(), wet = g();
+      this.satOut.connect(hp); hp.connect(lp); lp.connect(sh); sh.connect(ring); ring.connect(wet); wet.connect(this.fader);
+      if (type === 'robot') {
+        ring.gain.value = 0;
+        const o = ctx.createOscillator(); o.frequency.value = ct.ring || 55; o.connect(ring.gain); o.start(); this.oscs.push(o);
+      }
+      sched(wet.gain, keys);
+    }
+  }
   get reduction() { const r = this.comp.reduction; return typeof r === 'number' ? r : (r && r.value) || 0; }
   level() {
     if (!this.analyser) return 0;
@@ -454,7 +490,7 @@ function buildGraph(ctx, project, only, live) {
   if (analyser) { analyser.fftSize = 1024; trim.connect(analyser); }
   const gv = new Strip(ctx, { fx: groups.vocal.fx, vol: groups.vocal.vol }, null, master.input, live);
   const gb = new Strip(ctx, { fx: groups.backing.fx, vol: groups.backing.vol }, null, master.input, live);
-  const needSends = live || project.tracks.some((t) => (!only || only(t)) && t.fx && ((t.fx.rev || 0) > 0 || (t.fx.dly || 0) > 0));
+  const needSends = live || project.tracks.some((t) => (!only || only(t)) && t.fx && ((t.fx.rev || 0) > 0 || (t.fx.dly || 0) > 0 || (t.clips || []).some((c) => c.fx && (c.fx.echo > 0 || c.fx.reverb > 0))));
   const sends = needSends ? new Sends(ctx, project.bus, gv.fader) : null;
   const chains = new Map();
   const anySolo = project.tracks.some((t) => t.solo);
@@ -472,6 +508,49 @@ function setLimiter(graph, on, t) {
   const l = graph.limiter;
   if (on) { l.threshold.setValueAtTime(-1.5, t); l.ratio.setValueAtTime(20, t); l.knee.setValueAtTime(0, t); l.attack.setValueAtTime(0.002, t); l.release.setValueAtTime(0.12, t); }
   else { l.threshold.setValueAtTime(0, t); l.ratio.setValueAtTime(1, t); l.knee.setValueAtTime(0, t); }
+}
+
+// ---- per-clip effects → time curves ([[time, value], ...], linear in between) ----
+export function curveAt(keys, t) {
+  if (!keys.length) return 0;
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) if (t <= keys[i][0]) { const [t0, v0] = keys[i - 1], [t1, v1] = keys[i]; return t1 > t0 ? v0 + (v1 - v0) * (t - t0) / (t1 - t0) : v1; }
+  return keys[keys.length - 1][1];
+}
+export const CLIP_FX_DEFAULT = { echo: 0, reverb: 0, tail: false, voice: 'none', voiceMix: 0.8, vol: 0, muffle: 0 };
+export function clipHasFx(fx) { return !!fx && ((fx.echo || 0) > 0 || (fx.reverb || 0) > 0 || (fx.vol || 0) !== 0 || (fx.muffle || 0) > 0 || (fx.voice && fx.voice !== 'none' && (fx.voiceMix || 0) > 0)); }
+export function autoPlan(tr) {
+  const clips = (tr.clips || []).filter((c) => clipHasFx(c.fx));
+  if (!clips.length) return null;
+  const regs = { rev: [], dly: [], vol: [], lp: [], dry: [], col: {} };
+  const X = 0.03, S = 0.06;
+  for (const c of clips) {
+    const fx = c.fx, s = c.at, e = c.at + (c.b - c.a);
+    const ss = fx.tail ? Math.max(s, e - 0.8) : s;
+    // sends: start sending, stop at the clip end — the echo / reverb keeps ringing after it
+    if (fx.echo > 0) regs.dly.push([ss, ss + S, e, e + S, fx.echo * 0.9]);
+    if (fx.reverb > 0) regs.rev.push([ss, ss + S, e, e + S, fx.reverb * 0.8]);
+    if (fx.vol) regs.vol.push([s - X, s + X, e - X, e + X, fx.vol]);
+    if (fx.muffle > 0) regs.lp.push([s - X, s + X, e - X, e + X, fx.muffle]);
+    if (fx.voice && fx.voice !== 'none' && fx.voiceMix > 0) {
+      (regs.col[fx.voice] = regs.col[fx.voice] || []).push([s - X, s + X, e - X, e + X, fx.voiceMix * (fx.voice === 'robot' ? 1.4 : 1.1)]);
+      regs.dry.push([s - X, s + X, e - X, e + X, fx.voiceMix]);
+    }
+  }
+  const w = (r, t) => (t <= r[0] || t >= r[3]) ? 0 : t < r[1] ? (t - r[0]) / (r[1] - r[0]) : t <= r[2] ? 1 : (r[3] - t) / (r[3] - r[2]);
+  const build = (list, map) => {
+    if (!list.length) return null;
+    const ts = [...new Set(list.flatMap((r) => r.slice(0, 4)).map((t) => Math.max(0, Math.round(t * 1000) / 1000)))].sort((a, b) => a - b);
+    return ts.map((t) => [t, map(list.reduce((acc, r) => acc + w(r, t) * r[4], 0))]);
+  };
+  const plan = {
+    rev: build(regs.rev, (v) => v), dly: build(regs.dly, (v) => v),
+    vol: build(regs.vol, (db) => Math.pow(10, db / 20)),
+    lp: build(regs.lp, (m) => 24000 * Math.pow(350 / 24000, Math.min(1, m))),
+    dry: build(regs.dry, (m) => Math.max(0, 1 - m)), col: {},
+  };
+  for (const [k, list] of Object.entries(regs.col)) plan.col[k] = build(list, (v) => v);
+  return plan;
 }
 
 // track clips: [{at (timeline sec), a, b (sec inside the track's audio)}]
@@ -550,6 +629,7 @@ export class Engine {
     this.graph = opts.light ? buildLightGraph(this.ctx, project) : buildGraph(this.ctx, project, null, true);
     const when = this.ctx.currentTime + (opts.lead || 0.06);
     this.sources = startSources(this.ctx, project, this.graph, bufferFor, when, from);
+    if (!opts.light) for (const tr of project.tracks) { const ch = this.graph.chains.get(tr.id); if (ch) ch.applyAuto(autoPlan(tr), this.graph.sends, when, from); }
     this.startCtxTime = when; this.startPos = from; this.playing = true;
     return when;
   }
@@ -634,6 +714,7 @@ export async function renderMix(project, bufferFor, sampleRate, include, onProgr
     const ctx = new OAC(2, total, sr);
     const graph = buildGraph(ctx, proj, include, false);
     startSources(ctx, proj, graph, bufferFor, 0, from);
+    for (const tr of proj.tracks) { const ch = graph.chains.get(tr.id); if (ch) ch.applyAuto(autoPlan(tr), graph.sends, 0, from); }
     let timer = null;
     const t0 = performance.now();
     if (onProgress) timer = setInterval(() => { try { onProgress(Math.min(0.99, ctx.currentTime / (total / sr)), (performance.now() - t0) / 1000); } catch (e) { /* ignore */ } }, 250);

@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
-import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET } from './audio-engine.js';
-export const APP_VERSION = 'v9';
+import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT } from './audio-engine.js';
+export const APP_VERSION = 'v10';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -941,6 +941,13 @@ function drawClip(g, tr, buf, peaks, y) {
       const v = Math.sqrt(Math.min(1, m)) * (hh / 2 - 3) * Math.max(0, Math.min(1, fl));
       if (v > 0.3) g.fillRect(x, mid - v, 1, v * 2);
     }
+    if (clipHasFx(c.fx) && w > 24) {
+      const bx = Math.max(x0, 0), bw = Math.max(0, Math.min(x0 + w, TL.w) - bx);
+      g.fillStyle = 'rgba(180,140,255,0.25)'; g.fillRect(bx, top + hh - 15, bw, 15);
+      g.fillStyle = '#d7c3ff'; g.font = 'bold 10px -apple-system, sans-serif';
+      g.save(); g.beginPath(); g.rect(bx, top, bw, hh); g.clip();
+      g.fillText(clipFxLabel(c.fx), bx + 5, top + hh - 4); g.restore();
+    }
     if (selClip) {
       g.fillStyle = '#f4c95d';
       roundRect(g, x0 - 5, top + hh / 2 - 14, 10, 28, 4); g.fill();
@@ -1073,7 +1080,7 @@ async function clipOp(op) {
   if (op === 'split') {
     const c = clipAtPlayhead(tr); if (!c) { toast('再生位置（黄色い線）をクリップの上に置いてください'); return; }
     const m = c.a + (T - c.at);
-    const n = Object.assign({}, c, { at: T, a: m }); c.b = m;
+    const n = Object.assign({}, c, { at: T, a: m, fx: c.fx ? clone(c.fx) : undefined }); c.b = m;
     tr.clips.push(n); afterClipEdit(tr, n); toast('分割しました（右側を選択中）', 1300);
   } else if (op === 'cutL' || op === 'cutR') {
     const c = sel; if (!c) return;
@@ -1084,7 +1091,7 @@ async function clipOp(op) {
     toast(op === 'cutL' ? '黄色い線より前をカットしました' : '黄色い線より後をカットしました', 1300);
   } else if (op === 'dup') {
     const c = sel; if (!c) return;
-    const n = Object.assign({}, c, { at: clipEndT(c) });
+    const n = Object.assign({}, c, { at: clipEndT(c), fx: c.fx ? clone(c.fx) : undefined });
     tr.clips.push(n); afterClipEdit(tr, n); toast('複製しました（すぐ後ろに配置）', 1400);
   } else if (op === 'del') {
     const c = sel; if (!c) return;
@@ -1124,6 +1131,61 @@ async function joinClips(tr, list) {
   processTrack(tr);
   toast('結合しました（↶ で戻せます）', 1400);
 }
+// ---- 部分エフェクト: effects only on one clip (split the clip first to choose the part) ----
+const CLIP_FX_PRESETS = [
+  ['clear', 'なし', {}],
+  ['tailecho', '語尾エコー', { echo: 0.7, tail: true }],
+  ['echo', 'エコー', { echo: 0.5 }],
+  ['bigverb', '残響たっぷり', { reverb: 0.7 }],
+  ['tailverb', '語尾リバーブ', { reverb: 0.8, tail: true }],
+  ['phone', '電話', { voice: 'phone', voiceMix: 1 }],
+  ['radio', 'ラジオ', { voice: 'radio', voiceMix: 1 }],
+  ['mega', 'メガホン', { voice: 'megaphone', voiceMix: 0.9 }],
+  ['robot', 'ロボ', { voice: 'robot', voiceMix: 0.8 }],
+  ['lofi', 'ローファイ', { voice: 'lofi', voiceMix: 1 }],
+  ['muffle', 'こもり', { muffle: 0.75 }],
+  ['whisper', 'ささやき', { vol: -4, reverb: 0.5 }],
+];
+function clipFxLabel(fx) {
+  if (!clipHasFx(fx)) return '';
+  const a = [];
+  if (fx.voice && fx.voice !== 'none' && fx.voiceMix > 0) a.push({ phone: '電話', radio: 'ラジオ', megaphone: 'メガホン', robot: 'ロボ', lofi: 'ローファイ' }[fx.voice] || fx.voice);
+  if (fx.echo > 0) a.push(fx.tail ? '語尾エコー' : 'エコー');
+  if (fx.reverb > 0) a.push(fx.tail ? '語尾リバーブ' : 'リバーブ');
+  if (fx.muffle > 0) a.push('こもり');
+  if (fx.vol) a.push(`音量${fx.vol > 0 ? '+' : ''}${fx.vol}dB`);
+  return '✨ ' + a.join('・');
+}
+function clipFxSheet(tr, c) {
+  const changed = () => { saveProject(); drawTimeline(); if (engine.playing) playFrom(engine.position, currentPlayFilter); };
+  const cur = () => Object.assign({}, CLIP_FX_DEFAULT, c.fx || {});
+  const setFx = (o) => { c.fx = clipHasFx(o) ? o : undefined; };
+  openModal((box, close) => {
+    const render = () => {
+      box.innerHTML = '';
+      const fx = cur();
+      const upd = (k, v, re) => { const o = cur(); o[k] = v; setFx(o); changed(); if (re) render(); };
+      box.append(h('h3', {}, '✨ 部分エフェクト'),
+        h('p', { class: 'note', style: 'margin:0 0 8px' }, `このクリップ（${fmtTime(c.at)}〜${fmtTime(clipEndT(c))}）だけにかかります。かけたい所だけ「✂ 分割」で切ってから選んでください。エコーや残響はクリップが終わってもふわっと残ります。`),
+        h('p', { class: 'note', style: 'margin:0' }, 'タップで重ねがけできます（「なし」で全部リセット）'),
+        h('div', { class: 'chips wrap' }, ...CLIP_FX_PRESETS.map(([id, name, o]) => h('button', { onclick: () => { setFx(id === 'clear' ? Object.assign({}, CLIP_FX_DEFAULT) : Object.assign(cur(), o)); changed(); render(); } }, name))),
+        slider({ label: 'エコー', min: 0, max: 100, step: 1, value: Math.round(fx.echo * 100), fmt: (v) => v + '%', oninput: (v) => upd('echo', v / 100) }),
+        slider({ label: '残響', min: 0, max: 100, step: 1, value: Math.round(fx.reverb * 100), fmt: (v) => v + '%', oninput: (v) => upd('reverb', v / 100) }),
+        switchRow('エコー・残響は語尾（最後0.8秒）だけ', fx.tail, (v) => upd('tail', v)),
+        h('div', { class: 'lbl-line' }, '声の加工'),
+        chips([['none', 'なし'], ['phone', '電話'], ['radio', 'ラジオ'], ['megaphone', 'メガホン'], ['robot', 'ロボ'], ['lofi', 'ローファイ']], fx.voice, (v) => upd('voice', v, true)),
+        fx.voice !== 'none' ? slider({ label: '加工の量', min: 0, max: 100, step: 1, value: Math.round(fx.voiceMix * 100), fmt: (v) => v + '%', oninput: (v) => upd('voiceMix', v / 100) }) : null,
+        slider({ label: 'こもり', min: 0, max: 100, step: 1, value: Math.round(fx.muffle * 100), fmt: (v) => v + '%', oninput: (v) => upd('muffle', v / 100) }),
+        slider({ label: '音量', min: -18, max: 6, step: 0.5, value: fx.vol, fmt: fmtDb, oninput: (v) => upd('vol', v) }),
+        h('div', { class: 'actions' },
+          h('button', { class: 'big-btn primary', onclick: () => { engine.ensure(); playFrom(Math.max(0, c.at - 1.5), null); } }, '▶ この部分を試聴'),
+          h('button', { class: 'big-btn ghost', onclick: () => { c.fx = undefined; changed(); render(); } }, 'このクリップのエフェクトを消す'),
+          h('button', { class: 'big-btn ghost', onclick: close }, '完了')));
+    };
+    render();
+  });
+}
+
 function emptyTrackAfterEdit(tr) {
   if (isVox(tr)) {
     tr.audioId = null; tr.pitch.notes = null; tr.cuts = []; tr.clips = []; tr.offset = 0;
@@ -1809,7 +1871,18 @@ const fxUi = { group: 'std' };
 function buildFxTab(body, tr) {
   const fx = tr.fx;
   const cat = tr.kind;
-  const pick = (k, t) => { tr.fx = t ? clone(t.fx) : fxFromPreset(k); tr.fx.preset = k; migrateFx(tr.fx); trackChanged(tr, true); };
+  const pick = async (k, t) => {
+    tr.fx = t ? clone(t.fx) : fxFromPreset(k); tr.fx.preset = k; migrateFx(tr.fx); trackChanged(tr, true);
+    // keep the volumes matched to the new effect (louder/quieter templates)
+    if (tr.audioId) {
+      await autoLevel(tr, true);
+      const bt = BALANCE_TPL.find((b) => b.id === project.groups.balanceTpl);
+      const hasV = project.tracks.some((x) => isVox(x) && x.audioId), hasB = project.tracks.some((x) => x.kind === 'backing' && x.audioId);
+      if (hasV && hasB) await autoBalance(bt ? bt.lu : 1.5, true);
+      saveProject(); renderSheet();
+      toast('エフェクトに合わせて音量も整えました', 1600);
+    }
+  };
   if (cat === 'vocal') {
     const groups = [...Object.entries(PRESET_GROUPS), ['mine', 'マイ']];
     body.append(chips(groups, fxUi.group, (g) => { fxUi.group = g; renderSheet(); }));
@@ -1946,26 +2019,62 @@ function buildGroupFxTab(body, gr) {
   const changed = () => { engine.updateGroups(project); saveProject(); drawTimeline(); };
   body.append(slider({ label: '音量', min: -24, max: 12, step: 0.5, value: gs.vol, fmt: fmtDb, oninput: (v) => { gs.vol = v; changed(); } }));
   if (gr.key === 'master') body.append(switchRow('リミッター（音割れ防止）', gs.limiter, (v) => { gs.limiter = v; changed(); }));
-  body.append(presetGrid(gr.cat, gs.fx.preset, (k, t) => {
+  body.append(presetGrid(gr.cat, gs.fx.preset, async (k, t) => {
     gs.fx = t ? clone(t.fx) : fxFromPreset(k); gs.fx.preset = k; migrateFx(gs.fx);
-    if (gr.key === 'master' && (k === 'gm_cd' || k === 'gm_video')) { project.exportFinal = k === 'gm_cd' ? 'cd' : 'video'; toast(k === 'gm_cd' ? '書き出しも「CD仕様」にしました' : '書き出しも「歌ってみた動画」にしました', 1800); }
+    if (!t) await applyGroupLink(gr.key, k); // built-in template → also set volumes / reverb / limiter etc.
     changed(); renderSheet();
   }));
   fxTools(body, gs.fx, gr.cat, (nfx) => { gs.fx = nfx; changed(); renderSheet(); }, gr.name);
   fxDetail(body, gs.fx, gr.key === 'vocal', changed, true);
 }
 const BALANCE_TPL = [
-  { id: 'front', name: '歌を前に', desc: '歌ってみたの定番', lu: 1.5 },
-  { id: 'even', name: 'バランス', desc: '歌と音源を同じくらい', lu: 0 },
-  { id: 'ballad', name: 'しっとり', desc: '歌をやや前に・柔らかく', lu: 0.8 },
-  { id: 'band', name: 'バンド感', desc: '音源の迫力を活かす', lu: -1.5 },
+  { id: 'front', name: '歌を前に', desc: '歌ってみたの定番', lu: 1.5, gv: 'gv_front', gb: 'gb_space' },
+  { id: 'even', name: 'バランス', desc: '歌と音源を同じくらい', lu: 0, gv: 'gv_glue', gb: 'gb_flat' },
+  { id: 'ballad', name: 'しっとり', desc: '歌をやや前に・柔らかく', lu: 0.8, gv: 'gv_shine', gb: 'gb_soft' },
+  { id: 'band', name: 'バンド感', desc: '音源の迫力を活かす', lu: -1.5, gv: 'gv_front', gb: 'gb_band' },
 ];
+// what else a built-in group template changes, so everything matches the template
+const GROUP_LINKS = {
+  gv_flat: { lu: 0.5, msg: 'ボーカル類のエフェクトをなしにして音量を整えました' },
+  gv_glue: { lu: 0.8, reverb: 'plate', delay: '1/8', fb: 0.25, msg: '音量・リバーブ（プレート）も合わせました' },
+  gv_front: { lu: 1.5, reverb: 'room', delay: '1/8', fb: 0.22, msg: '歌を前に出す音量・短めのリバーブにしました' },
+  gv_shine: { lu: 1.0, reverb: 'hall', delay: '1/4', fb: 0.3, msg: '音量・広いリバーブ（ホール）も合わせました' },
+  gb_flat: { lu: 0.5, msg: '音源のエフェクトをなしにして音量を整えました' },
+  gb_space: { lu: 1.5, msg: '歌が聴こえやすい音量バランスにしました' },
+  gb_punch: { lu: 0, msg: '音源を少し大きめのバランスにしました' },
+  gb_band: { lu: -1.5, msg: 'バンドの迫力を活かすバランスにしました' },
+  gb_soft: { lu: 2.0, msg: '音源を控えめにしたバランスにしました' },
+  gm_flat: { limiter: true, mvol: 0, final: 'stream', msg: 'マスターを素通し・書き出しは配信向けにしました' },
+  gm_natural: { limiter: true, mvol: 0, final: 'stream', msg: '書き出しを配信向け（-14）にしました' },
+  gm_clear: { limiter: true, mvol: 0, final: 'stream', msg: '書き出しを配信向け（-14）にしました' },
+  gm_loud: { limiter: true, mvol: 0, final: 'loud', msg: '書き出しを大きめ（-10）にしました' },
+  gm_video: { limiter: true, mvol: 0, final: 'video', msg: '書き出しを「歌ってみた動画」（-11）にしました' },
+  gm_cd: { limiter: true, mvol: 0, final: 'cd', msg: '書き出しを「CD仕様」（-9・44.1kHz/16bit）にしました' },
+};
+async function applyGroupLink(key, presetId) {
+  const L = GROUP_LINKS[presetId];
+  if (!L) return;
+  const G = project.groups;
+  if (L.reverb) { project.bus.reverb.type = L.reverb; project.bus.delay.note = L.delay; project.bus.delay.feedback = L.fb; engine.updateBus(project); }
+  if (key === 'master') { G.master.limiter = L.limiter; G.master.vol = L.mvol; project.exportFinal = L.final; }
+  if (L.lu != null) { await autoBalance(L.lu, true); G.balanceTpl = null; }
+  toast(L.msg, 2200);
+}
 function buildBalanceTab(body) {
   const G = project.groups;
   const changed = () => { engine.updateGroups(project); saveProject(); drawTimeline(); };
   body.append(h('p', { class: 'note', style: 'margin:0 0 8px' }, '歌（ボーカル類）と音源の音量バランスを自動で整えます。'));
   const grid = h('div', { class: 'preset-grid' });
-  for (const t of BALANCE_TPL) grid.append(h('button', { class: G.balanceTpl === t.id ? 'on' : '', onclick: async () => { await autoBalance(t.lu); G.balanceTpl = t.id; saveProject(); renderSheet(); } }, h('b', {}, t.name), h('small', {}, t.desc)));
+  for (const t of BALANCE_TPL) grid.append(h('button', { class: G.balanceTpl === t.id ? 'on' : '', onclick: async () => {
+    // also switch the vocal / backing group effects to match
+    G.vocal.fx = fxFromPreset(t.gv); G.vocal.fx.preset = t.gv; migrateFx(G.vocal.fx);
+    G.backing.fx = fxFromPreset(t.gb); G.backing.fx.preset = t.gb; migrateFx(G.backing.fx);
+    const L = GROUP_LINKS[t.gv];
+    if (L && L.reverb) { project.bus.reverb.type = L.reverb; project.bus.delay.note = L.delay; project.bus.delay.feedback = L.fb; engine.updateBus(project); }
+    engine.updateGroups(project);
+    await autoBalance(t.lu, true); G.balanceTpl = t.id; saveProject(); renderSheet();
+    toast(`「${t.name}」：音量とボーカル類・音源のエフェクトを合わせました`, 2200);
+  } }, h('b', {}, t.name), h('small', {}, t.desc)));
   body.append(grid);
   body.append(section('手動で調整', true,
     slider({ label: 'ボーカル類', min: -24, max: 12, step: 0.5, value: G.vocal.vol, fmt: fmtDb, oninput: (v) => { G.vocal.vol = v; G.balanceTpl = null; changed(); } }),
@@ -2008,6 +2117,13 @@ function sourceSlice(tr, buf, T0, len, sr) {
   }
   return out;
 }
+function shiftPlan(plan, from) {
+  if (!plan || !from) return plan;
+  const sh = (k) => (k ? k.map(([t, v]) => [t - from, v]) : null);
+  const o = { rev: sh(plan.rev), dly: sh(plan.dly), vol: sh(plan.vol), lp: sh(plan.lp), dry: sh(plan.dry), col: {} };
+  for (const [k, v] of Object.entries(plan.col || {})) o.col[k] = sh(v);
+  return o;
+}
 // opts: {sr, from, maxSec, noTail, groups, end:{mode:'measure'|'file', target, ceil, bits}, onProgress}
 async function renderJS(include, opts) {
   const sr = opts.sr;
@@ -2022,7 +2138,7 @@ async function renderJS(include, opts) {
   const B = 4096, total = Math.ceil((span + tail) * sr / B) * B;
   const cfg = {
     sr, total,
-    tracks: tracks.map((t) => ({ id: t.id, kind: t.kind, nch: bufferFor(t).numberOfChannels > 1 ? 2 : 1, fx: t.fx, vol: t.vol || 0, pan: t.pan || 0, clipGain: t.clipGain || 0 })),
+    tracks: tracks.map((t) => ({ id: t.id, kind: t.kind, nch: bufferFor(t).numberOfChannels > 1 ? 2 : 1, fx: t.fx, vol: t.vol || 0, pan: t.pan || 0, clipGain: t.clipGain || 0, auto: shiftPlan(autoPlan(t), from) })),
     groups: opts.groups || project.groups, bus: project.bus,
   };
   await rpc({ type: 'mixBegin', cfg: JSON.parse(JSON.stringify(cfg)) });
@@ -2992,6 +3108,7 @@ $('btnRedo').onclick = () => { if (!rec.active) redo(); };
 $('btnFollow').onclick = () => { settings.follow = settings.follow === false; saveSettings(); refreshHead(); toast(settings.follow ? '再生位置を自動で追いかけます' : '自動追尾をオフにしました', 1400); };
 $('ebDone').onclick = () => deselectClip();
 $('ebJoin').onclick = () => clipOp('join');
+$('ebFx').onclick = () => { const tr = selTrack(), c = selClipObj(); if (tr && c) clipFxSheet(tr, c); };
 $('ebSplit').onclick = () => clipOp('split');
 $('ebCutL').onclick = () => clipOp('cutL');
 $('ebCutR').onclick = () => clipOp('cutR');

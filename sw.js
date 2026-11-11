@@ -2,7 +2,7 @@
 // It never sends your recordings or projects anywhere.
 // v6: network-first — when online, the newest app files are always used, so an update
 // shows up immediately (old projects open in the new version too). Offline → cached copy.
-const VERSION = 'utamix-v9';
+const VERSION = 'utamix-v10';
 const FILES = [
   './', 'index.html', 'manifest.webmanifest', 'app.css',
   'app.js', 'audio-engine.js', 'storage.js', 'pitch-editor.js',

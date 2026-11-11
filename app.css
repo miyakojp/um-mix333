@@ -292,7 +292,7 @@ select.key-select { width: 72px; height: 32px; padding: 0 8px; font-size: 15px; 
 .clipbar #ebDone { width: 28px; height: 28px; border-radius: 14px; background: #3a3020; color: #f4c95d; font-size: 13px; flex: none; }
 .clipbar .cb-btns { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
 .clipbar .cb-btns::-webkit-scrollbar { display: none; }
-.clipbar .cb-btns button { flex: 1 1 0; min-width: 44px; height: 50px; padding: 0 2px; border-radius: 10px; background: #2e2717; color: var(--text); font-size: 10px; font-weight: 700; white-space: nowrap; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+.clipbar .cb-btns button { flex: 1 1 0; min-width: 41px; height: 50px; padding: 0 2px; border-radius: 10px; background: #2e2717; color: var(--text); font-size: 10px; font-weight: 700; white-space: nowrap; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
 .clipbar .cb-btns button i { font-style: normal; font-size: 16px; line-height: 1; color: #f4c95d; }
 .clipbar .cb-btns button:disabled { opacity: .35; }
 .clipbar .cb-btns button.on { background: #13302d; }

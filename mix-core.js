@@ -325,6 +325,19 @@
     }
   }
 
+  // piecewise-linear time curve reader (times in samples, read forward)
+  class Curve {
+    constructor(keys, sr) { this.t = keys.map((k) => k[0] * sr); this.v = keys.map((k) => k[1]); this.i = 0; }
+    at(n) {
+      const t = this.t, v = this.v;
+      if (n <= t[0]) return v[0];
+      while (this.i < t.length - 1 && n > t[this.i + 1]) this.i++;
+      if (this.i >= t.length - 1) return v[v.length - 1];
+      const t0 = t[this.i], t1 = t[this.i + 1];
+      return t1 > t0 ? v[this.i] + (v[this.i + 1] - v[this.i]) * (n - t0) / (t1 - t0) : v[this.i + 1];
+    }
+  }
+
   // ---------- channel strip ----------
   class Strip {
     constructor(sr, cfg, nch) {
@@ -363,6 +376,17 @@
       }
       this.rev = fx.rev || 0; this.dly = fx.dly || 0;
       this.t = 0;
+      // per-clip effects (time curves)
+      const au = cfg.auto;
+      if (au) {
+        const C = (k) => (k && k.length ? new Curve(k, sr) : null);
+        this.aRev = C(au.rev); this.aDly = C(au.dly); this.aVol = C(au.vol); this.aDry = C(au.dry);
+        this.aLp = au.lp && au.lp.length ? { c: new Curve(au.lp, sr), f: new BQ('lowpass', sr, 0.7, 0, sr), cur: -1 } : null;
+        this.aCol = Object.entries(au.col || {}).filter(([k, v]) => COLOR_TYPES[k] && v && v.length).map(([k, v]) => {
+          const ct = COLOR_TYPES[k];
+          return { c: new Curve(v, sr), hp: new BQ('highpass', ct.hp, ct.q, 0, sr), lp: new BQ('lowpass', ct.lp, ct.q, 0, sr), curve: satCurve(ct.drive, ct.bits), ring: k === 'robot' ? (ct.ring || 55) : 0 };
+        });
+      }
       this.tmp = null;
     }
     // chs: input channels (n samples, modified). faderAdd: [L,R] added at the fader (group returns).
@@ -405,8 +429,12 @@
           }
         } else if (dry !== 1) for (const x of chs) for (let i = 0; i < n; i++) x[i] *= dry;
       }
+      this._colDrySig = null;
+      // per-clip voice effects take the signal from before the base colour (like satOut in playback)
+      const pre = this.aCol && this.aCol.length ? chs.map((x) => new Float32Array(x)) : null;
       if (this.col) {
         const cl = this.col, dry = 1 - this.colMix, wet = this.colWet;
+        if (this.aDry) this._colDrySig = chs.map((x) => { const d = new Float32Array(n); for (let i = 0; i < n; i++) d[i] = x[i] * dry; return d; });
         for (let c = 0; c < nch; c++) {
           const x = chs[c];
           for (let i = 0; i < n; i++) {
@@ -417,14 +445,53 @@
           }
         }
       }
+      // per-clip voice effects (in parallel with the normal sound, which is faded down by "dry")
+      if (this.aCol && this.aCol.length || this.aDry) {
+        const t0 = this.t;
+        const ys = this.aCol ? this.aCol.map(() => chs.map(() => new Float32Array(n))) : [];
+        if (this.aCol) this.aCol.forEach((ac, k) => {
+          for (let c = 0; c < chs.length; c++) {
+            const x = pre[c], y = ys[k][c];
+            for (let i = 0; i < n; i++) {
+              let v = ac.lp.step(ac.hp.step(x[i], c), c);
+              v = shape(ac.curve, v);
+              if (ac.ring) v *= Math.sin(2 * Math.PI * ac.ring * (t0 + i) / sr);
+              y[i] = v;
+            }
+          }
+        });
+        // the plain/base-colour signal is scaled by "dry"; the base colour wet part was already mixed in,
+        // so scale the whole stage output (matches: colDry→autoDry, colWet unaffected only when no base colour)
+        for (let i = 0; i < n; i++) {
+          const d = this.aDry ? this.aDry.at(t0 + i) : 1;
+          let w = []; if (this.aCol) for (let k = 0; k < this.aCol.length; k++) w.push(this.aCol[k].c.at(t0 + i));
+          for (let c = 0; c < chs.length; c++) {
+            let o = (this._colDrySig ? this._colDrySig[c][i] * d + (chs[c][i] - this._colDrySig[c][i]) : chs[c][i] * d);
+            for (let k = 0; k < w.length; k++) o += ys[k][c][i] * w[k];
+            chs[c][i] = o;
+          }
+        }
+      }
       if (faderAdd) {
         if (nch === 1) { const x = chs[0]; for (let i = 0; i < n; i++) x[i] += 0.5 * (faderAdd[0][i] + faderAdd[1][i]); }
         else for (let c = 0; c < 2; c++) { const x = chs[c], a = faderAdd[c]; for (let i = 0; i < n; i++) x[i] += a[i]; }
       }
       if (this.fader !== 1) for (const x of chs) for (let i = 0; i < n; i++) x[i] *= this.fader;
+      if (this.aLp) {
+        const al = this.aLp, nyq = sr / 2;
+        for (let i0 = 0; i0 < n; i0 += 32) {
+          const f = Math.min(nyq, al.c.at(this.t + i0));
+          if (Math.abs(f - al.cur) > 0.5) { const nb = new BQ('lowpass', f, 0.7, 0, sr); al.f.c = nb.c; al.cur = f; }
+          const e = Math.min(n, i0 + 32);
+          for (let c = 0; c < chs.length; c++) { const x = chs[c]; for (let i = i0; i < e; i++) x[i] = al.f.step(x[i], c); }
+        }
+      }
+      if (this.aVol) { const t0 = this.t; for (let i = 0; i < n; i++) { const gg = this.aVol.at(t0 + i); for (const x of chs) x[i] *= gg; } }
       // sends (post fader, pre pan, mono)
       if (revOut && this.rev > 0) { const g = this.rev; if (nch === 1) { const x = chs[0]; for (let i = 0; i < n; i++) revOut[i] += x[i] * g; } else { const a = chs[0], b = chs[1]; for (let i = 0; i < n; i++) revOut[i] += 0.5 * (a[i] + b[i]) * g; } }
       if (dlyOut && this.dly > 0) { const g = this.dly; if (nch === 1) { const x = chs[0]; for (let i = 0; i < n; i++) dlyOut[i] += x[i] * g; } else { const a = chs[0], b = chs[1]; for (let i = 0; i < n; i++) dlyOut[i] += 0.5 * (a[i] + b[i]) * g; } }
+      if (revOut && this.aRev) { const t0 = this.t, m = chs.length === 1; for (let i = 0; i < n; i++) { const gg = this.aRev.at(t0 + i); if (gg) revOut[i] += (m ? chs[0][i] : 0.5 * (chs[0][i] + chs[1][i])) * gg; } }
+      if (dlyOut && this.aDly) { const t0 = this.t, m = chs.length === 1; for (let i = 0; i < n; i++) { const gg = this.aDly.at(t0 + i); if (gg) dlyOut[i] += (m ? chs[0][i] : 0.5 * (chs[0][i] + chs[1][i])) * gg; } }
       // doubler (from the post-fader signal, added after the pan)
       if (this.dbl > 0) {
         const g = this.dbl * 0.55;
@@ -506,7 +573,7 @@
       this.master = new Strip(sr, { fx: gr.master.fx, vol: gr.master.vol }, 2);
       this.limiter = gr.master.limiter ? new Comp(sr, -1.5, 0, 20, 0.002, 0.12) : new Comp(sr, 0, 0, 1, 0.003, 0.25);
       this.trim = dbToGain(-0.8);
-      const needSends = cfg.tracks.some((t) => (t.fx.rev || 0) > 0 || (t.fx.dly || 0) > 0);
+      const needSends = cfg.tracks.some((t) => (t.fx.rev || 0) > 0 || (t.fx.dly || 0) > 0 || (t.auto && (t.auto.rev || t.auto.dly)));
       this.sends = needSends ? new Sends(sr, cfg.bus, B) : null;
       this.keep = cfg.keep !== false;
       if (this.keep) { this.L = new Float32Array(cfg.total); this.R = new Float32Array(cfg.total); }
