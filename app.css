@@ -336,3 +336,5 @@ pre.tree { background: var(--panel3); border-radius: 10px; padding: 10px 12px; f
 .group-head .gh-name { font-size: 11.5px; }
 .group-head .gfx { width: 24px; margin-right: 4px; }
 .link-btn { background: none; color: var(--mint); font-size: 12.5px; font-weight: 700; padding: 8px 0; text-align: left; }
+.num-in { width: 64px; flex: 1; min-width: 52px; height: 32px; border-radius: 8px; border: 1px solid #3a4150; background: #0f1216; color: var(--text); font-size: 16px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; -moz-appearance: textfield; }
+.num-in::-webkit-outer-spin-button, .num-in::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }

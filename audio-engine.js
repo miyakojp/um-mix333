@@ -619,9 +619,15 @@ export class Engine {
       const AC = window.AudioContext || window.webkitAudioContext;
       this.ctx = new AC({ latencyHint: 'interactive' });
     }
-    try { if (navigator.audioSession && navigator.audioSession.type !== 'play-and-record') navigator.audioSession.type = 'playback'; } catch (e) { /* ignore */ }
     if (this.ctx.state !== 'running') this.ctx.resume().catch(() => {});
     return this.ctx;
+  }
+  // throw away the audio engine and make a fresh one (iPhone sometimes leaves it stuck after switching to the mic)
+  async recreate() {
+    this.stop(true); this.disposeGraph();
+    const old = this.ctx; this.ctx = null;
+    if (old) { try { await old.close(); } catch (e) { /* ignore */ } }
+    return this.ensure();
   }
   get sampleRate() { return this.ensure().sampleRate; }
   get position() {

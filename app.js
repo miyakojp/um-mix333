@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
 import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT, flatFx, groupCfg } from './audio-engine.js';
-export const APP_VERSION = 'v12';
+export const APP_VERSION = 'v14';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -1478,10 +1478,12 @@ async function startRecordingInner(forceTarget, isRetry) {
   const target = forceTarget || recTargetTrack();
   if (!target && project.tracks.length >= MAX_TRACKS) { toast(`トラックは最大${MAX_TRACKS}本までです`); return; }
   bgStop();
-  const ctx = engine.ensure();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { infoModal('マイクが使えません', 'https:// のアドレスで開いているか確認してください。'); return; }
   let stream;
-  try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch (e) { /* ignore */ }
+  // tell iPhone we will play and record (only when it is not already set: every switch pauses the audio for a moment)
+  try { if (navigator.audioSession && navigator.audioSession.type !== 'play-and-record') navigator.audioSession.type = 'play-and-record'; } catch (e) { /* ignore */ }
+  let ctx = isRetry ? await engine.recreate() : engine.ensure();
+  if (isRetry) workletReady = false;
   const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 };
   if (settings.micId) audio.deviceId = { exact: settings.micId };
   try { stream = await navigator.mediaDevices.getUserMedia({ audio }); }
@@ -1490,8 +1492,12 @@ async function startRecordingInner(forceTarget, isRetry) {
     if (!stream) { infoModal('マイクを使えませんでした', 'マイクへのアクセスを許可してください（iPhoneの「設定」→ Safari またはこのアプリ →「マイク」）。'); return; }
   }
   // switching the iPhone audio session can pause the audio engine for a moment → wait until it runs again
-  const resumeCtx = async () => { for (let i = 0; i < 20 && ctx.state !== 'running'; i++) { try { await Promise.race([ctx.resume(), new Promise((r) => setTimeout(r, 150))]); } catch (e) { /* retry */ } } };
-  try { await resumeCtx(); if (!workletReady) { await ctx.audioWorklet.addModule('recorder-worklet.js'); workletReady = true; } }
+  const resumeCtx = async () => { for (let i = 0; i < 14 && ctx.state !== 'running'; i++) { try { await Promise.race([ctx.resume(), new Promise((r) => setTimeout(r, 150))]); } catch (e) { /* retry */ } } };
+  try {
+    await resumeCtx();
+    if (ctx.state !== 'running') { ctx = await engine.recreate(); workletReady = false; await resumeCtx(); }
+    if (!workletReady) { await ctx.audioWorklet.addModule('recorder-worklet.js'); workletReady = true; }
+  }
   catch (e) { stream.getTracks().forEach((t) => t.stop()); infoModal('録音を開始できませんでした', 'iOSを最新にしてお試しください。'); return; }
   if (engine.playing) engine.stop();
   const src = ctx.createMediaStreamSource(stream);
@@ -1529,16 +1535,17 @@ async function startRecordingInner(forceTarget, isRetry) {
   keepAwake();
   // watchdog: if no sound data arrives from the mic, restart the recording once automatically
   const session = rec.session = (rec.session || 0) + 1;
+  const deadMic = () => rec.len === 0 || (rec.len > ctx.sampleRate * 1.5 && rec.peaks.every((p) => p === 0));
   setTimeout(async () => {
-    if (!rec.active || rec.session !== session || rec.len > 0) return;
+    if (!rec.active || rec.session !== session || !deadMic()) return;
     await resumeCtx();
     setTimeout(async () => {
-      if (!rec.active || rec.session !== session || rec.len > 0) return;
+      if (!rec.active || rec.session !== session || !deadMic()) return;
       const tgt = rec.target, pos = rec.punchPos;
       await abortRecording();
       engine.seek(pos);
       if (!isRetry) { toast('マイクの準備をやり直しています…', 1500); startRecording(tgt, true); }
-      else infoModal('マイクの音が届いていません', 'もう一度 ● を押してください。続く場合は、イヤホンを付け直すか、アプリを開き直してください（録音の設定で「使うマイク」を「自動」にすると直ることがあります）。');
+      else infoModal('マイクの音が届いていません', 'アプリを上にスワイプして完全に閉じ、開き直してから ● を押してください（マイクの許可を聞かれたら「許可」）。それでもだめなら「⋯ → 録音の設定 → マイクのテスト」で確認できます。');
     }, 1300);
   }, 1200);
 }
@@ -1838,10 +1845,20 @@ function buildMixTab(body, tr) {
     slider({ label: '音量', min: -36, max: 6, step: 0.5, value: tr.vol, fmt: fmtDb, oninput: (v) => { tr.vol = v; trackChanged(tr); } }),
     slider({ label: 'パン', min: -1, max: 1, step: 0.05, value: tr.pan, fmt: (v) => Math.abs(v) < 0.025 ? 'C' : (v < 0 ? 'L' : 'R') + Math.round(Math.abs(v) * 100), oninput: (v) => { tr.pan = v; trackChanged(tr); } }));
   const dur = (buffers.get(tr.audioId) || { duration: 10 }).duration;
-  const tv = h('span', { class: 'val', style: 'width:auto;flex:1;text-align:center;font-size:12px' });
-  const updT = () => { tv.textContent = trackStart(tr).toFixed(3) + 's'; };
+  // timing: shown and typed as milliseconds of shift from where it was; 「リセット」 puts it back
+  const tv = h('input', { type: 'number', inputmode: 'numeric', step: '1', class: 'num-in', 'aria-label': 'タイミング（ミリ秒）' });
+  const updT = () => { tv.value = String(Math.round(tr.nudgeMs || 0)); };
   updT();
-  const nudge = (d) => { d = Math.max(-trackStart(tr), d); tr.clips.forEach((c) => { c.at = Math.round((c.at + d) * 1000) / 1000; }); fixClips(tr); updT(); saveProject(); drawTimeline(); if (engine.playing) playFrom(engine.position, currentPlayFilter); };
+  const nudge = (d) => {
+    const want = d;
+    d = Math.max(-trackStart(tr), d);
+    if (want < d - 1e-6) toast('曲の頭（0秒）より前には動かせません', 1600);
+    if (Math.abs(d) < 1e-6) { updT(); return; }
+    tr.clips.forEach((c) => { c.at = Math.round((c.at + d) * 10000) / 10000; });
+    tr.nudgeMs = Math.round(((tr.nudgeMs || 0) + d * 1000) * 10) / 10;
+    fixClips(tr); updT(); saveProject(); drawTimeline(); if (engine.playing) playFrom(engine.position, currentPlayFilter);
+  };
+  tv.addEventListener('change', () => { const v = parseFloat(tv.value); if (!isFinite(v)) { updT(); return; } nudge((Math.max(-2000, Math.min(2000, v)) - (tr.nudgeMs || 0)) / 1000); });
   body.append(section('詳細', false,
     slider({ label: '入力ゲイン', min: -20, max: 24, step: 0.5, value: tr.clipGain, fmt: fmtDb, oninput: (v) => { tr.clipGain = v; trackChanged(tr); } }),
     isVox(tr) ? h('div', { class: 'mini-btns', style: 'margin:0 0 8px' }, h('button', { onclick: () => autoLevel(tr, false) }, '入力を自動で揃える')) : null,
@@ -1851,6 +1868,9 @@ function buildMixTab(body, tr) {
       h('div', { class: 'mini-btns nudge' },
         h('button', { onclick: () => nudge(-0.01) }, '−10'), h('button', { onclick: () => nudge(-0.001) }, '−1'), tv,
         h('button', { onclick: () => nudge(0.001) }, '+1'), h('button', { onclick: () => nudge(0.01) }, '+10'))),
+    h('div', { class: 'mini-btns', style: 'margin:0 0 8px' },
+      h('button', { onclick: () => nudge(-(tr.nudgeMs || 0) / 1000) }, 'タイミングをリセット（0 ms）')),
+    h('p', { class: 'note', style: 'margin:0 0 8px' }, 'マイナスで早く、プラスで遅くなります。数字をタップして直接入力もできます。'),
     h('div', { class: 'lbl-line' }, '種類'),
     chips([['backing', '伴奏'], ['vocal', 'メイン'], ['harmony', 'ハモリ']], tr.kind, (k) => setKind(tr, k))));
   body.append(h('div', { class: 'mini-btns grid3', style: 'margin-top:10px' },
@@ -3009,6 +3029,36 @@ function filesSaveSheet() {
   });
 }
 
+async function micTest() {
+  if (rec.active) return;
+  busy('マイクのテスト中… 何か声を出してください', 0);
+  let stream = null, peak = 0, state = '';
+  try {
+    try { if (navigator.audioSession && navigator.audioSession.type !== 'play-and-record') navigator.audioSession.type = 'play-and-record'; } catch (e) { /* ignore */ }
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+    if (settings.micId) audio.deviceId = { exact: settings.micId };
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio }); }
+    catch (e) { if (settings.micId) { delete audio.deviceId; stream = await navigator.mediaDevices.getUserMedia({ audio }); } else throw e; }
+    let ctx = engine.ensure();
+    for (let i = 0; i < 10 && ctx.state !== 'running'; i++) { await Promise.race([ctx.resume(), new Promise((r) => setTimeout(r, 150))]).catch(() => {}); }
+    if (ctx.state !== 'running') { ctx = await engine.recreate(); workletReady = false; await ctx.resume().catch(() => {}); }
+    state = ctx.state;
+    const src = ctx.createMediaStreamSource(stream), an = ctx.createAnalyser(); an.fftSize = 2048;
+    src.connect(an);
+    const d = new Float32Array(an.fftSize);
+    for (let i = 0; i < 30; i++) { await new Promise((r) => setTimeout(r, 100)); an.getFloatTimeDomainData(d); for (const v of d) peak = Math.max(peak, Math.abs(v)); busy('マイクのテスト中… 何か声を出してください', (i + 1) / 30); }
+    src.disconnect();
+  } catch (e) {
+    busy(false); if (stream) stream.getTracks().forEach((t) => t.stop());
+    infoModal('マイクを使えませんでした', (e && e.name === 'NotAllowedError') ? 'マイクが許可されていません。アプリを完全に閉じて開き直し、マイクの許可を聞かれたら「許可」を押してください。' : 'マイクを開けませんでした（' + ((e && e.name) || e) + '）。他のアプリがマイクを使っていないか確認してください。');
+    return;
+  }
+  stream.getTracks().forEach((t) => t.stop());
+  busy(false);
+  const label = (stream.getAudioTracks()[0] || {}).label || '';
+  if (peak > 0.0005) infoModal('🎤 マイクOK', `音が届いています（最大 ${Math.round(20 * Math.log10(peak))} dB）。${label ? '使用中：' + label : ''}`);
+  else infoModal('マイクの音が届いていません', `音が0のままでした（音声エンジン：${state}）。アプリを完全に閉じて開き直してから、もう一度テストしてください。Bluetoothイヤホンを使っている場合は、一度外して試してください。`);
+}
 function recordSettings() {
   openModal((c, close) => {
     const render = () => {
@@ -3026,6 +3076,7 @@ function recordSettings() {
         switchRow('自分の声をイヤホンで聴く', settings.monitor, (v) => { settings.monitor = v; saveSettings(); }),
         h('div', { class: 'lbl-line' }, '使うマイク'),
         micBox,
+        h('button', { class: 'big-btn', onclick: micTest }, '🎤 マイクのテスト（3秒）'),
         h('p', { class: 'note' }, '音質のコツ：AirPodsなどBluetoothイヤホンを付けたまま録ると、iPhoneが「通話用の低音質マイク」に切り替わり、伴奏も声もこもります。有線イヤホン（またはLightning/USB-C変換）＋「iPhoneのマイク」がいちばんきれいに録れます。録音中は画面の再生処理を軽くして音飛びを防いでいます。'),
         h('div', { class: 'actions' }, h('button', { class: 'big-btn ghost', onclick: close }, '閉じる')));
     };

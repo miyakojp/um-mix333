@@ -706,16 +706,38 @@ export class PitchEditor {
         p.append(slider('声質', -6, 6, 0.1, n.form || 0, (v) => (v > 0 ? '+' : '') + v.toFixed(1), (v) => { for (const i of selIdx) notes[i].form = v; this.draw(); }, () => { this.pushUndo(); this.committed(); }),
           h('div', { class: 'mini-btns', style: 'margin:6px 0' }, h('button', { onclick: () => this.setSel((q) => { q.form = 0; }) }, '元に戻す')));
       } else if (this.tool === 'time') {
-        const nudge = (d) => {
-          if (selIdx.length !== 1) return;
-          const i = selIdx[0], q = notes[i], L = this.timeLimits(i);
-          const dd = Math.max(L.lo - (L.s0 + (q.ts || 0)), Math.min(L.hi - (L.e0 + (q.te || 0)), d));
-          this.pushUndo(); q.ts = (q.ts || 0) + dd; q.te = (q.te || 0) + dd; this.committed();
+        // move the selected notes together by d seconds (they only stop at notes that are not selected)
+        const nudge = (d, noUndo) => {
+          if (!noUndo) this.pushUndo();
+          const set = new Set(selIdx);
+          let dd = d;
+          for (const i of selIdx) {
+            const q = notes[i], L = this.timeLimits(i);
+            if (dd < 0 && !set.has(i - 1)) dd = Math.max(dd, Math.min(0, L.lo - (L.s0 + (q.ts || 0))));
+            if (dd > 0 && !set.has(i + 1)) dd = Math.min(dd, Math.max(0, L.hi - (L.e0 + (q.te || 0))));
+          }
+          for (const i of selIdx) { const q = notes[i]; q.ts = (q.ts || 0) + dd; q.te = (q.te || 0) + dd; }
+          if (Math.abs(dd - d) > 0.0005) this.api.toast('隣の音にぶつかるので、ここまでしか動かせません', 1600);
+          this.committed(); this.renderPanel(); this.draw();
         };
+        const curMs = Math.round(((n.ts || 0) + (n.te || 0)) / 2 * 1000);
+        const inp = h('input', { type: 'number', inputmode: 'numeric', step: '1', class: 'num-in', value: String(curMs), 'aria-label': 'ずらす量（ミリ秒）' });
+        inp.addEventListener('change', () => {
+          const v = parseFloat(inp.value);
+          if (!isFinite(v)) { inp.value = String(curMs); return; }
+          this.pushUndo();
+          // set each selected note to exactly v ms (from its original place)
+          for (const i of selIdx) { const q = notes[i]; const mid = ((q.ts || 0) + (q.te || 0)) / 2; q.ts = (q.ts || 0) - mid; q.te = (q.te || 0) - mid; }
+          nudge(Math.max(-1, Math.min(1, v / 1000)), true);
+        });
+        p.append(h('div', { class: 'row' }, h('label', {}, 'ずらす量(ms)'),
+          h('div', { class: 'mini-btns nudge' },
+            h('button', { onclick: () => nudge(-0.01) }, '−10'), h('button', { onclick: () => nudge(-0.001) }, '−1'), inp,
+            h('button', { onclick: () => nudge(0.001) }, '+1'), h('button', { onclick: () => nudge(0.01) }, '+10'))),
+          h('p', { class: 'note', style: 'margin:0 0 6px' }, (selIdx.length > 1 ? `選んだ${selIdx.length}個の音をまとめて動かします。` : '') + 'マイナスで早く、プラスで遅く。数字をタップして直接入力できます。'));
         p.append(h('div', { class: 'mini-btns', style: 'margin:6px 0' },
-          h('button', { onclick: () => nudge(-0.01) }, '← 10ms'),
-          h('button', { onclick: () => nudge(0.01) }, '10ms →'),
-          h('button', { onclick: () => this.setSel((q) => { q.ts = 0; q.te = 0; }) }, 'タイミングを戻す')));
+          h('button', { onclick: () => { this.setSel((q) => { q.ts = 0; q.te = 0; }); this.renderPanel(); } }, '選んだ音をリセット'),
+          h('button', { onclick: () => { this.pushUndo(); for (const q of notes) { q.ts = 0; q.te = 0; } this.committed(); this.renderPanel(); this.draw(); this.api.toast('すべての音のタイミングを元に戻しました'); } }, '全部の音をリセット')));
       }
     } else {
       p.append(h('p', { class: 'note', style: 'margin:0 0 6px' }, TOOL_HINT[this.tool] + ' 空いている所をタップで再生位置、2本指で拡大・縮小。'));
