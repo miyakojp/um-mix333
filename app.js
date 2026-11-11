@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
-import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT } from './audio-engine.js';
-export const APP_VERSION = 'v10';
+import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT, flatFx, groupCfg } from './audio-engine.js';
+export const APP_VERSION = 'v11';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -301,10 +301,27 @@ function scheduleProcess(tr, delay = 220) {
   clearTimeout(procTimers.get(tr.id));
   procTimers.set(tr.id, setTimeout(() => processTrack(tr), delay));
 }
+// 聴き比べ: tracks listed here play the original recording (playback only, never exported)
+const abOrig = new Set();
 function bufferFor(tr) {
   if (!tr.audioId) return null;
   if (needsProcessing(tr) && processed.has(tr.id)) return processed.get(tr.id);
   return buffers.get(tr.audioId) || null;
+}
+function playBufferFor(tr) {
+  if (tr.audioId && abOrig.has(tr.id)) return buffers.get(tr.audioId) || null;
+  return bufferFor(tr);
+}
+function setOrigListen(tr, on) {
+  if (on) abOrig.add(tr.id); else abOrig.delete(tr.id);
+  if (engine.playing) playFrom(engine.position, currentPlayFilter);
+  toast(on ? '元の声（補正前）で再生中' : '補正後の声で再生中', 1300);
+}
+function setFxOff(target, off) {
+  target.fxOff = off;
+  if (engine.playing) playFrom(engine.position, currentPlayFilter); else { engine.updateGroups(project); }
+  saveProject(); renderLaneHeads(); renderSheet(); drawTimeline();
+  toast(off ? 'エフェクトOFF（素の音）' : 'エフェクトON', 1200);
 }
 function reprocessTuned() { for (const t of project.tracks) if (isVox(t) && t.pitch.enabled && t.pitch.tuneOn) scheduleProcess(t); }
 
@@ -406,7 +423,7 @@ async function showHome() {
   if (project) { await flushSave(); await gcProject(project); await flushSave(); }
   project = null;
   clearProjectMemory();
-  TL.selClip = -1; $('editBar').classList.add('hidden');
+  TL.selClip = -1; $('editBar').classList.add('hidden'); abOrig.clear();
   setView('home');
   if (window.__utamixUpdateReady) { location.reload(); return; }
   const list = $('projectList');
@@ -893,7 +910,7 @@ function drawTimeline() {
       g.fillStyle = gr.color + '55'; g.fillRect(0, y + GROUP_H / 2 - 4, TL.w * lvl, 8);
       const gs = project.groups[gr.key];
       g.fillStyle = '#8d95a5'; g.font = '11px -apple-system, sans-serif';
-      g.fillText(`${(PRESETS[gs.fx.preset] || { name: 'カスタム' }).name} · ${fmtDb(gs.vol)}`, 8, y + GROUP_H / 2 + 4);
+      g.fillText(`${gs.fxOff ? 'エフェクトOFF' : (PRESETS[gs.fx.preset] || { name: 'カスタム' }).name} · ${fmtDb(gs.vol)}`, 8, y + GROUP_H / 2 + 4);
     });
   }
   g.fillStyle = '#f4c95d'; g.fillRect(Math.round(px), 0, 1.5, Math.min(TL.h, tracksHeight() - TL.scrollY));
@@ -959,7 +976,9 @@ function drawClip(g, tr, buf, peaks, y) {
   const tags = [];
   if (tr.kind === 'backing' && tr.keyShift) tags.push(`キー${tr.keyShift > 0 ? '+' : ''}${tr.keyShift}`);
   if (isVox(tr) && tr.clean.on) tags.push('ノイズ除去');
-  if (isVox(tr) && tr.pitch.enabled) { if (tr.pitch.notes) tags.push('補正'); if (tr.pitch.tuneOn) tags.push('オートチューン'); }
+  if (isVox(tr) && tr.pitch.enabled && !abOrig.has(tr.id)) { if (tr.pitch.notes) tags.push('補正'); if (tr.pitch.tuneOn) tags.push('オートチューン'); }
+  if (abOrig.has(tr.id)) tags.push('元の声で再生中');
+  if (tr.fxOff) tags.push('エフェクトOFF');
   if (tags.length && tr.clips.length) { g.fillStyle = '#5fd4c4'; g.font = 'bold 10px -apple-system, sans-serif'; g.fillText(tags.join(' · '), Math.max(0, (tr.clips[0].at - TL.scrollX) * TL.pps) + 6, top + 12); }
   g.globalAlpha = 1;
 }
@@ -974,17 +993,18 @@ function renderLaneHeads() {
   const inner = h('div', { class: 'lane-heads-inner', id: 'laneHeadsInner' });
   project.tracks.forEach((tr) => {
     inner.append(h('div', { class: 'lane-head' + (tr.id === selectedId ? ' sel' : ''), style: `--c:${tr.color}`, onclick: () => { TL.selClip = -1; updateEditBar(); selectTrack(tr.id, true); drawTimeline(); } },
-      h('div', { class: 'ln' }, tr.name),
+      h('div', { class: 'ln' }, tr.name, h('span', { class: 'kb k-' + tr.kind }, KIND_BADGE[tr.kind])),
       h('div', { class: 'lb' },
         h('button', { class: 'm' + (tr.mute ? ' on' : ''), onclick: (e) => { e.stopPropagation(); tr.mute = !tr.mute; engine.updateAudibility(project); saveProject(); renderLaneHeads(); drawTimeline(); } }, 'M'),
         h('button', { class: 's' + (tr.solo ? ' on' : ''), onclick: (e) => { e.stopPropagation(); tr.solo = !tr.solo; engine.updateAudibility(project); saveProject(); renderLaneHeads(); drawTimeline(); } }, 'S'),
-        isVox(tr) ? h('button', { class: 'r' + (rec.active && rec.target === tr ? ' on' : ''), 'aria-label': '録音', onclick: (e) => { e.stopPropagation(); recordInto(tr); } }, '●') : null,
-        h('span', { class: 'badge k-' + tr.kind }, KIND_BADGE[tr.kind]))));
+        h('button', { class: 'fx' + (tr.fxOff ? '' : ' on'), 'aria-label': 'エフェクトのオン・オフ', onclick: (e) => { e.stopPropagation(); setFxOff(tr, !tr.fxOff); } }, 'FX'),
+        isVox(tr) ? h('button', { class: 'r' + (rec.active && rec.target === tr ? ' on' : ''), 'aria-label': '録音', onclick: (e) => { e.stopPropagation(); recordInto(tr); } }, '●') : null)));
   });
   if (rec.active && !rec.punch) inner.append(h('div', { class: 'lane-head', style: '--c:#ff7656' }, h('div', { class: 'ln', style: 'color:#ff7656' }, '● 録音中'), h('div', { class: 'note', style: 'font-size:11px' }, KIND_LABEL[rec.kind])));
   if (project.tracks.length) {
     inner.append(h('div', { class: 'group-sep' }));
-    GROUPS.forEach((gr) => inner.append(h('div', { class: 'group-head' + (gr.id === selectedId ? ' sel' : ''), style: `--c:${gr.color}`, onclick: () => { TL.selClip = -1; updateEditBar(); selectTrack(gr.id, true); } }, h('span', { class: 'gh-dot' }), gr.name)));
+    GROUPS.forEach((gr) => { const gs = project.groups[gr.key]; inner.append(h('div', { class: 'group-head' + (gr.id === selectedId ? ' sel' : ''), style: `--c:${gr.color}`, onclick: () => { TL.selClip = -1; updateEditBar(); selectTrack(gr.id, true); } }, h('span', { class: 'gh-dot' }), h('span', { class: 'gh-name' }, gr.key === 'vocal' ? 'ボーカル' : gr.name),
+      h('button', { class: 'gfx' + (gs.fxOff ? '' : ' on'), 'aria-label': 'エフェクトのオン・オフ', onclick: (e) => { e.stopPropagation(); setFxOff(gs, !gs.fxOff); } }, 'FX'))); });
   }
   heads.append(inner);
   inner.style.transform = `translateY(${-TL.scrollY}px)`;
@@ -1333,7 +1353,7 @@ function playFrom(pos, filter) {
   playbackSession();
   currentPlayFilter = filter || null;
   const proj = filter ? Object.assign({}, project, { tracks: project.tracks.filter(filter) }) : project;
-  engine.play(proj, bufferFor, pos);
+  engine.play(proj, playBufferFor, pos);
   updateTransportUI();
 }
 function togglePlay(filter) {
@@ -1868,9 +1888,16 @@ function presetGrid(cat, current, onPick, groupFilter) {
   return grid;
 }
 const fxUi = { group: 'std' };
+function fxOnOffRow(target) {
+  return h('div', { class: 'fx-onoff' + (target.fxOff ? ' off' : '') },
+    h('button', { class: !target.fxOff ? 'on' : '', onclick: () => setFxOff(target, false) }, 'エフェクト ON'),
+    h('button', { class: target.fxOff ? 'on' : '', onclick: () => setFxOff(target, true) }, 'OFF（素の音）'));
+}
 function buildFxTab(body, tr) {
   const fx = tr.fx;
   const cat = tr.kind;
+  body.append(fxOnOffRow(tr));
+  if (tr.fxOff) body.append(h('p', { class: 'note', style: 'margin:0 0 8px' }, 'エフェクトがすべてオフです（部分FXも含む）。音量とパンはそのまま。書き出しもオフのままになります。'));
   const pick = async (k, t) => {
     tr.fx = t ? clone(t.fx) : fxFromPreset(k); tr.fx.preset = k; migrateFx(tr.fx); trackChanged(tr, true);
     // keep the volumes matched to the new effect (louder/quieter templates)
@@ -2017,6 +2044,8 @@ function biquadDb(type, f0, gain, Q, f, sr) {
 function buildGroupFxTab(body, gr) {
   const gs = project.groups[gr.key];
   const changed = () => { engine.updateGroups(project); saveProject(); drawTimeline(); };
+  body.append(fxOnOffRow(gs));
+  if (gs.fxOff) body.append(h('p', { class: 'note', style: 'margin:0 0 8px' }, `${gr.name}のエフェクトがオフです（音量${gr.key === 'master' ? '・リミッター' : ''}はそのまま）。書き出しもオフのままになります。`));
   body.append(slider({ label: '音量', min: -24, max: 12, step: 0.5, value: gs.vol, fmt: fmtDb, oninput: (v) => { gs.vol = v; changed(); } }));
   if (gr.key === 'master') body.append(switchRow('リミッター（音割れ防止）', gs.limiter, (v) => { gs.limiter = v; changed(); }));
   body.append(presetGrid(gr.cat, gs.fx.preset, async (k, t) => {
@@ -2138,8 +2167,9 @@ async function renderJS(include, opts) {
   const B = 4096, total = Math.ceil((span + tail) * sr / B) * B;
   const cfg = {
     sr, total,
-    tracks: tracks.map((t) => ({ id: t.id, kind: t.kind, nch: bufferFor(t).numberOfChannels > 1 ? 2 : 1, fx: t.fx, vol: t.vol || 0, pan: t.pan || 0, clipGain: t.clipGain || 0, auto: shiftPlan(autoPlan(t), from) })),
-    groups: opts.groups || project.groups, bus: project.bus,
+    tracks: tracks.map((t) => ({ id: t.id, kind: t.kind, nch: bufferFor(t).numberOfChannels > 1 ? 2 : 1, fx: t.fxOff ? flatFx(t.fx) : t.fx, vol: t.vol || 0, pan: t.pan || 0, clipGain: t.clipGain || 0, auto: shiftPlan(autoPlan(t), from) })),
+    groups: (() => { const G = opts.groups || project.groups; const o = {}; for (const k of ['vocal', 'backing', 'master']) o[k] = Object.assign({}, G[k], { fx: groupCfg(G[k]).fx }); return o; })(),
+    bus: project.bus,
   };
   await rpc({ type: 'mixBegin', cfg: JSON.parse(JSON.stringify(cfg)) });
   const CH = B * 24, t0 = performance.now();
@@ -2339,6 +2369,11 @@ function buildPitchTab(body, tr) {
       } }, '音程を解析する'));
     return;
   }
+  body.append(h('div', { class: 'lbl-line' }, '聴き比べ（すぐ切り替わります）'),
+    h('div', { class: 'fx-onoff' + (abOrig.has(tr.id) ? ' off' : '') },
+      h('button', { class: abOrig.has(tr.id) ? '' : 'on', onclick: () => { setOrigListen(tr, false); renderSheet(); } }, '補正後'),
+      h('button', { class: abOrig.has(tr.id) ? 'on' : '', onclick: () => { setOrigListen(tr, true); renderSheet(); } }, '元の声')),
+    h('p', { class: 'note', style: 'margin:0 0 8px' }, '「元の声」は録音そのまま（ピッチ補正・ノイズ除去なし）で再生します。聴き比べ用なので、書き出しはいつも補正後です。'));
   body.append(switchRow('ピッチ補正を使う', p.enabled, (v) => { p.enabled = v; saveProject(); processTrack(tr); renderSheet(); }));
   body.append(h('button', { class: 'big-btn primary', style: 'margin:4px 0 10px', onclick: () => openPitchEditor(tr) }, 'ピッチエディタを開く'));
   const t = p.tune;
@@ -2762,6 +2797,7 @@ function exportSheet() {
       c.append(h('h3', {}, '書き出し'),
         h('div', { class: 'lbl-line' }, '内容'), chips(opts, st.what, (v) => { st.what = v; render(); }),
         h('div', { class: 'lbl-line' }, '音量の仕上げ'),
+        (project.tracks.some((t) => t.fxOff) || ['vocal', 'backing', 'master'].some((k) => project.groups[k].fxOff)) ? h('p', { class: 'note', style: 'color:var(--gold);margin:0 0 6px' }, '⚠ エフェクトOFFのトラックがあります。そのまま書き出されます。') : null,
         chips(FINALS.map((f) => [f.id, f.name]), st.final, (v) => { st.final = v; if (v === 'cd') st.bits = 16; render(); }),
         h('p', { class: 'note', style: 'margin:2px 0 6px' }, (FINALS.find((f) => f.id === st.final) || FINALS[0]).desc),
         h('div', { class: 'lbl-line' }, '形式'),
@@ -3074,6 +3110,7 @@ function openPitchEditor(tr) {
       root: $('pitch'), getProject: () => project, analysisOf: (t) => analyses.get(t.audioId), ensureNotes: (t) => ensureTrackNotes(t),
       schedulePitchRender: scheduleProcess, onRenderState: onProcState, saveProject, autoCorrect, noteNames: NOTE_NAMES, keyLabel,
       pickTrack, openTrack: editorOpenTrack, keySheet: editorKeySheet, ensureKey, tl, au,
+      origListen: (t) => abOrig.has(t.id), setOrigListen: (t, v) => setOrigListen(t, v),
       follow: () => settings.follow !== false, setFollow: (v) => { settings.follow = v; saveSettings(); refreshHead(); },
       play: (t, withBacking, from) => {
         engine.ensure();

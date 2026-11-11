@@ -479,7 +479,7 @@ function buildLightGraph(ctx, project) {
 
 function buildGraph(ctx, project, only, live) {
   const groups = project.groups;
-  const master = new Strip(ctx, { fx: groups.master.fx, vol: groups.master.vol }, null, ctx.createGain(), live);
+  const master = new Strip(ctx, groupCfg(groups.master), null, ctx.createGain(), live);
   // master -> limiter -> trim -> out
   master.out.disconnect();
   if (master.analyser) master.out.connect(master.analyser);
@@ -488,15 +488,15 @@ function buildGraph(ctx, project, only, live) {
   const analyser = live ? ctx.createAnalyser() : null;
   master.out.connect(limiter); limiter.connect(trim); trim.connect(ctx.destination);
   if (analyser) { analyser.fftSize = 1024; trim.connect(analyser); }
-  const gv = new Strip(ctx, { fx: groups.vocal.fx, vol: groups.vocal.vol }, null, master.input, live);
-  const gb = new Strip(ctx, { fx: groups.backing.fx, vol: groups.backing.vol }, null, master.input, live);
+  const gv = new Strip(ctx, groupCfg(groups.vocal), null, master.input, live);
+  const gb = new Strip(ctx, groupCfg(groups.backing), null, master.input, live);
   const needSends = live || project.tracks.some((t) => (!only || only(t)) && t.fx && ((t.fx.rev || 0) > 0 || (t.fx.dly || 0) > 0 || (t.clips || []).some((c) => c.fx && (c.fx.echo > 0 || c.fx.reverb > 0))));
   const sends = needSends ? new Sends(ctx, project.bus, gv.fader) : null;
   const chains = new Map();
   const anySolo = project.tracks.some((t) => t.solo);
   for (const tr of project.tracks) {
     if (only && !only(tr)) continue;
-    const ch = new Strip(ctx, tr, sends, tr.kind === 'backing' ? gb.input : gv.input, false);
+    const ch = new Strip(ctx, effCfg(tr), sends, tr.kind === 'backing' ? gb.input : gv.input, false);
     ch.setAudible(!tr.mute && (!anySolo || tr.solo));
     chains.set(tr.id, ch);
   }
@@ -510,6 +510,18 @@ function setLimiter(graph, on, t) {
   else { l.threshold.setValueAtTime(0, t); l.ratio.setValueAtTime(1, t); l.knee.setValueAtTime(0, t); }
 }
 
+// ---- effects ON/OFF: an "OFF" strip keeps volume / pan but no processing at all ----
+export function flatFx(fx) {
+  const o = JSON.parse(JSON.stringify(fx));
+  o.hpf = 0; (o.eq || []).forEach((b) => { b.g = 0; });
+  if (o.deess) o.deess.amount = 0;
+  if (o.comp) o.comp.on = false;
+  o.gain = 0; o.sat = 0; o.color = { type: 'none', mix: 0 }; o.doubler = 0; o.rev = 0; o.dly = 0;
+  return o;
+}
+export function effCfg(tr) { return tr.fxOff ? Object.assign({}, tr, { fx: flatFx(tr.fx) }) : tr; }
+export function groupCfg(g) { return { fx: g.fxOff ? flatFx(g.fx) : g.fx, vol: g.vol }; }
+
 // ---- per-clip effects → time curves ([[time, value], ...], linear in between) ----
 export function curveAt(keys, t) {
   if (!keys.length) return 0;
@@ -520,6 +532,7 @@ export function curveAt(keys, t) {
 export const CLIP_FX_DEFAULT = { echo: 0, reverb: 0, tail: false, voice: 'none', voiceMix: 0.8, vol: 0, muffle: 0 };
 export function clipHasFx(fx) { return !!fx && ((fx.echo || 0) > 0 || (fx.reverb || 0) > 0 || (fx.vol || 0) !== 0 || (fx.muffle || 0) > 0 || (fx.voice && fx.voice !== 'none' && (fx.voiceMix || 0) > 0)); }
 export function autoPlan(tr) {
+  if (tr.fxOff) return null;
   const clips = (tr.clips || []).filter((c) => clipHasFx(c.fx));
   if (!clips.length) return null;
   const regs = { rev: [], dly: [], vol: [], lp: [], dry: [], col: {} };
@@ -643,7 +656,7 @@ export class Engine {
   updateTrack(project, track) {
     if (!this.graph) return;
     const ch = this.graph.chains.get(track.id);
-    if (ch) ch.update(track);
+    if (ch) ch.update(effCfg(track));
     this.updateAudibility(project);
   }
   updateAudibility(project) {
@@ -656,9 +669,9 @@ export class Engine {
     if (!this.graph) return;
     if (this.graph.light) return;
     const G = project.groups;
-    this.graph.gv.update({ fx: G.vocal.fx, vol: G.vocal.vol });
-    this.graph.gb.update({ fx: G.backing.fx, vol: G.backing.vol });
-    this.graph.master.update({ fx: G.master.fx, vol: G.master.vol });
+    this.graph.gv.update(groupCfg(G.vocal));
+    this.graph.gb.update(groupCfg(G.backing));
+    this.graph.master.update(groupCfg(G.master));
     setLimiter(this.graph, G.master.limiter, this.ctx.currentTime);
   }
   reduction(trackId) {

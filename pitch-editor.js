@@ -108,7 +108,7 @@ export class PitchEditor {
     set('#peTune', tr.pitch.tuneOn, tr.pitch.tuneOn ? 'オートチューン ON' : 'オートチューン');
     set('#peSnap', this.snap);
     if (this.api.follow) set('#peFollow', this.api.follow(), this.api.follow() ? '追尾' : '追尾オフ');
-    set('#peAB', tr.pitch.enabled, tr.pitch.enabled ? '補正 ON' : '補正 OFF');
+    { const orig = this.api.origListen ? this.api.origListen(tr) : false; set('#peAB', !orig, orig ? '元の声' : '補正後'); }
     set('#peWithBacking', this.withBacking);
     const ref = this.refTrack();
     set('#peRef', !!ref, '参照：' + (ref ? ref.name : 'なし'));
@@ -586,10 +586,9 @@ export class PitchEditor {
     q('#peRedo').onclick = () => this.redo();
     q('#peSnap').onclick = () => { this.snap = !this.snap; this.syncHeader(); };
     q('#peFollow').onclick = () => { if (this.api.setFollow) this.api.setFollow(!this.api.follow()); this.syncHeader(); };
+    // 聴き比べ: switch instantly between the corrected voice and the original recording
     q('#peAB').onclick = () => {
-      this.tr.pitch.enabled = !this.tr.pitch.enabled;
-      this.api.saveProject();
-      this.api.schedulePitchRender(this.tr, 0);
+      if (this.api.setOrigListen) this.api.setOrigListen(this.tr, !this.api.origListen(this.tr));
       this.syncHeader(); this.draw();
     };
     q('#peWithBacking').onclick = () => { this.withBacking = !this.withBacking; this.syncHeader(); if (this.api.isPlaying()) { this.api.stop(); this.api.play(this.tr, this.withBacking, this.pos); } };
