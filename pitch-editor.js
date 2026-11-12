@@ -90,10 +90,11 @@ export class PitchEditor {
     const hop = this.an.hop;
     this.pps = 110;
     this.pxSemi = 18;
-    if (notes.length) {
-      const ms = notes.map((n) => this.noteT(n)).sort((a, b) => a - b);
+    const vis = notes.filter((n) => this.noteVisible(n));
+    if (vis.length) {
+      const ms = vis.map((n) => this.noteT(n)).sort((a, b) => a - b);
       this.top = ms[ms.length >> 1] + (this.H - RH) / this.pxSemi / 2;
-      const startT = this.T(notes[0].s * hop);
+      const startT = Math.min(...vis.slice(0, 50).map((n) => this.T(n.s * hop)));
       const p = this.pos > startT ? this.pos : startT;
       this.t0 = Math.max(0, p - 0.4);
     } else {
@@ -138,6 +139,16 @@ export class PitchEditor {
   get off() { return this.tr.offset || 0; }
   // audio time <-> timeline time (tracks can be split into clips)
   T(t) { return this.api.tl ? this.api.tl(this.tr, t) : (this.tr.offset || 0) + t; }
+  // parts of the recording that are actually used on the timeline (clips). Notes outside them are hidden.
+  ranges() {
+    const cl = this.tr.clips;
+    if (!cl || !cl.length) return [{ a: 0, b: 1e9, at: this.tr.offset || 0 }];
+    return cl.map((c) => ({ a: c.a, b: c.b, at: c.at })).sort((x, y) => x.at - y.at);
+  }
+  noteVisible(n) {
+    const a = n.s * this.an.hop, b = n.e * this.an.hop;
+    return this.ranges().some((r) => b > r.a + 0.005 && a < r.b - 0.005);
+  }
   A(T) { return this.api.au ? this.api.au(this.tr, T) : T - (this.tr.offset || 0); }
   noteOutStart(n) { return n.s * this.hop + (n.ts || 0); }
   noteOutEnd(n) { return n.e * this.hop + (n.te || 0); }
@@ -227,7 +238,9 @@ export class PitchEditor {
     }
     // blobs
     const color = tr.color || '#5fd4c4';
+    const visible = this.notes.map((n) => this.noteVisible(n));
     this.notes.forEach((n, i) => {
+      if (!visible[i]) return;
       const xs = this.x(this.T(this.noteOutStart(n))), xe = this.x(this.T(this.noteOutEnd(n)));
       if (xe < KW || xs > W) return;
       const tc = this.noteT(n);
@@ -273,17 +286,23 @@ export class PitchEditor {
       }
     });
     // pitch curves
-    const k0 = Math.max(0, Math.floor(this.outToIn(this.A(this.t0)) / hop) - 2);
-    const k1 = Math.min(an.f0.length, Math.ceil(this.outToIn(this.A(this.tAt(W))) / hop) + 2);
+    // draw the pitch line clip by clip, so only the parts used on the timeline appear, each at its place
+    const tL = this.t0, tR = this.tAt(W);
     const curve = (useShift, style, width) => {
       g.strokeStyle = style; g.lineWidth = width; g.beginPath();
-      let pen = false;
-      for (let k = k0; k < k1; k++) {
-        if (!this.midi[k]) { pen = false; continue; }
-        const m = this.midi[k] + (useShift && tr.pitch.enabled ? this.shift[k] : 0);
-        const tt = useShift && tr.pitch.enabled ? this.inToOut((k + 0.5) * hop) : (k + 0.5) * hop;
-        const px = this.x(this.T(tt)), py = this.y(m);
-        if (pen) g.lineTo(px, py); else { g.moveTo(px, py); pen = true; }
+      for (const r of this.ranges()) {
+        if (r.at + (r.b - r.a) < tL || r.at > tR) continue;
+        const ia = Math.max(r.a, r.a + (tL - r.at) - 0.5), ib = Math.min(r.b, r.a + (tR - r.at) + 0.5);
+        const k0 = Math.max(0, Math.floor(ia / hop) - 2), k1 = Math.min(an.f0.length, Math.ceil(ib / hop) + 2);
+        let pen = false;
+        for (let k = k0; k < k1; k++) {
+          if (!this.midi[k]) { pen = false; continue; }
+          const m = this.midi[k] + (useShift && tr.pitch.enabled ? this.shift[k] : 0);
+          const tt = useShift && tr.pitch.enabled ? this.inToOut((k + 0.5) * hop) : (k + 0.5) * hop;
+          if (tt < r.a || tt > r.b) { pen = false; continue; }
+          const px = this.x(r.at + (tt - r.a)), py = this.y(m);
+          if (pen) g.lineTo(px, py); else { g.moveTo(px, py); pen = true; }
+        }
       }
       g.stroke();
     };
@@ -369,6 +388,7 @@ export class PitchEditor {
     const isNote = true;
     let best = -1, bd = 1e9;
     this.notes.forEach((n, i) => {
+      if (!this.noteVisible(n)) return;
       const a = this.noteOutStart(n), b = this.noteOutEnd(n);
       const pad = 8 / this.pps;
       if (t < a - pad || t > b + pad) return;
@@ -761,7 +781,7 @@ export class PitchEditor {
       p.append(h('p', { class: 'note', style: 'margin:0 0 6px' }, TOOL_HINT[this.tool] + ' 空いている所をタップで再生位置、2本指で拡大・縮小。'));
     }
     p.append(h('div', { class: 'mini-btns', style: 'margin-top:6px' },
-      h('button', { onclick: () => { this.sel = new Set(notes.map((_, i) => i)); this.renderPanel(); this.draw(); } }, 'すべて選択'),
+      h('button', { onclick: () => { this.sel = new Set(notes.map((_, i) => i).filter((i) => this.noteVisible(notes[i]))); this.renderPanel(); this.draw(); } }, 'すべて選択'),
       selIdx.length ? h('button', { onclick: () => { this.sel = new Set(); this.renderPanel(); this.draw(); } }, '選択解除') : null,
       h('button', { onclick: () => { this.fitView(); this.draw(); } }, '表示リセット')));
     if (this.tool === 'pitch') {

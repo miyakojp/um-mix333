@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
 import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT, flatFx, groupCfg } from './audio-engine.js';
-export const APP_VERSION = 'v15';
+export const APP_VERSION = 'v18';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -1470,7 +1470,8 @@ function recordInto(tr) {
   if (rec.active) stopRecording(); else startRecording(tr);
 }
 async function startRecording(forceTarget, isRetry) {
-  if (rec.finishing || rec.starting) { toast('前の録音を保存しています。少し待ってから ● を押してください', 2000); return; }
+  if (rec.starting) { toast('マイクの準備中です', 1200); return; }
+  if (rec.finishing) { toast('前の録音を保存しています。少し待ってから ● を押してください', 2000); return; }
   rec.starting = true;
   try { await startRecordingInner(forceTarget, isRetry); } finally { rec.starting = false; }
 }
@@ -1501,20 +1502,35 @@ async function startRecordingInner(forceTarget, isRetry) {
   catch (e) { stream.getTracks().forEach((t) => t.stop()); infoModal('録音を開始できませんでした', 'iOSを最新にしてお試しください。'); return; }
   if (engine.playing) engine.stop();
   const src = ctx.createMediaStreamSource(stream);
-  const node = new AudioWorkletNode(ctx, 'uta-recorder', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+  // two ways to capture: the audio-worklet recorder (normal), or an older ScriptProcessor recorder.
+  // On a retry (or if this iPhone needed it before) the older one is used — some home-screen apps
+  // get silence through the worklet.
+  const useSP = (isRetry || settings.captureMode === 'sp') && ctx.createScriptProcessor;
+  const node = useSP ? makeSPRecorder(ctx) : new AudioWorkletNode(ctx, 'uta-recorder', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
   const sink = ctx.createGain(); sink.gain.value = 0;
   src.connect(node); node.connect(sink); sink.connect(ctx.destination);
   let mon = null;
   if (settings.monitor) { mon = ctx.createGain(); mon.gain.value = 0.9; src.connect(mon); mon.connect(ctx.destination); }
-  Object.assign(rec, { stream, src, node, sink, mon, chunks: [], len: 0, peaks: [], firstFrame: -1, lastPeak: 0, target, punch: !!target, hiddenAt: 0,
+  Object.assign(rec, { mode: useSP ? 'sp' : 'worklet', wasRetry: !!isRetry, stream, src, node, sink, mon, chunks: [], len: 0, peaks: [], firstFrame: -1, lastPeak: 0, target, punch: !!target, hiddenAt: 0,
     kind: target ? target.kind : (settings.recTarget === 'newHarmony' ? 'harmony' : 'vocal') });
   node.port.onmessage = (e) => {
     const d = e.data;
-    if (d.firstFrame != null) rec.firstFrame = d.firstFrame;
+    if (d.firstFrame != null) { rec.firstFrame = d.firstFrame; rec.waitFirst = false; }
+    if (d.pcm && rec.waitFirst) return; // leftovers from before the restart
     if (d.pcm) { rec.chunks.push(d.pcm); rec.len += d.pcm.length; rec.peaks.push(d.peak); rec.lastPeak = d.peak; rec.lastChunkAt = performance.now(); }
     if (d.done && rec.onDone) rec.onDone();
   };
   node.port.postMessage('start');
+  // iPhone needs a moment after switching to the mic before sound really flows.
+  // Wait for it BEFORE the backing starts, so the first words are never lost.
+  {
+    toast('マイクの準備中…', 1500);
+    const t0 = performance.now();
+    while (rec.len === 0 && performance.now() - t0 < 3000) await new Promise((r) => setTimeout(r, 40));
+    await new Promise((r) => setTimeout(r, 250));
+    rec.chunks = []; rec.len = 0; rec.peaks = []; rec.firstFrame = -1; rec.waitFirst = true;
+    node.port.postMessage('start'); // restart counting from here
+  }
   rec.punchPos = engine.position;
   rec.startPos = Math.max(0, rec.punchPos - (settings.preroll || 0));
   rec.active = true;
@@ -1535,17 +1551,23 @@ async function startRecordingInner(forceTarget, isRetry) {
   keepAwake();
   // watchdog: if no sound data arrives from the mic, restart the recording once automatically
   const session = rec.session = (rec.session || 0) + 1;
-  const deadMic = () => rec.len === 0 || (rec.len > ctx.sampleRate * 1.5 && rec.peaks.every((p) => p === 0));
+  // "dead" = nothing arrives, or only (near) silence: a real mic always picks up some room noise
+  const deadMic = () => {
+    if (rec.len === 0) return true;
+    if (rec.len < ctx.sampleRate * 1.5) return false;
+    const pk = rec.peaks.slice().sort((a, b) => a - b);
+    return pk[Math.floor(pk.length * 0.9)] < 0.0001;
+  };
   setTimeout(async () => {
-    if (!rec.active || rec.session !== session || !deadMic()) return;
-    await resumeCtx();
+    if (!rec.active || rec.session !== session) return;
+    if (rec.len === 0) await resumeCtx();
     setTimeout(async () => {
       if (!rec.active || rec.session !== session || !deadMic()) return;
       const tgt = rec.target, pos = rec.punchPos;
       await abortRecording();
       engine.seek(pos);
       if (!isRetry) { toast('マイクの準備をやり直しています…', 1500); startRecording(tgt, true); }
-      else infoModal('マイクの音が届いていません', 'アプリを上にスワイプして完全に閉じ、開き直してから ● を押してください（マイクの許可を聞かれたら「許可」）。それでもだめなら「⋯ → 録音の設定 → マイクのテスト」で確認できます。');
+      else micTroubleModal();
     }, 1300);
   }, 1200);
 }
@@ -1611,6 +1633,12 @@ async function stopRecordingInner() {
   if (offset < punch) { data = data.subarray(Math.round((punch - offset) * sr)); offset = punch; }
   if (offset < 0) { data = data.subarray(Math.round(-offset * sr)); offset = 0; }
   if (data.length < sr * 0.3) { toast('録音が短すぎたので破棄しました'); refreshStudio(); return; }
+  { // a take with no sound at all (iPhone gave the app a silent mic) is not saved
+    let mx = 0; for (let i = 0; i < data.length; i += 7) { const v = Math.abs(data[i]); if (v > mx) mx = v; }
+    if (mx < 0.0002) { refreshStudio(); micTroubleModal(true); return; }
+    // the older recorder worked where the normal one gave silence → keep using it on this device
+    if (rec.mode === 'sp' && rec.wasRetry && settings.captureMode !== 'sp') { settings.captureMode = 'sp'; saveSettings(); }
+  }
   keepAwake();
   histCommit();
   if (R0.punch && R0.target && project.tracks.includes(R0.target)) {
@@ -3044,6 +3072,35 @@ function filesSaveSheet() {
   });
 }
 
+// ScriptProcessor-based recorder with the same messages as recorder-worklet.js
+function makeSPRecorder(ctx) {
+  const B = 1024, sp = ctx.createScriptProcessor(B, 1, 1);
+  const port = { onmessage: null, postMessage: null };
+  let on = false, first = -1, buf = new Float32Array(4096), n = 0, peak = 0;
+  const emit = (data) => { if (port.onmessage) port.onmessage({ data }); };
+  const flush = () => { if (n > 0) { emit({ pcm: buf.slice(0, n), peak }); n = 0; peak = 0; } };
+  port.postMessage = (m) => {
+    if (m === 'start') { on = true; first = -1; n = 0; peak = 0; }
+    if (m === 'stop') { flush(); on = false; setTimeout(() => emit({ done: true }), 0); }
+  };
+  sp.onaudioprocess = (e) => {
+    if (!on) return;
+    const ch = e.inputBuffer.getChannelData(0);
+    if (first < 0) { first = Math.max(0, Math.round(e.playbackTime * ctx.sampleRate) - B); emit({ firstFrame: first }); }
+    for (let i = 0; i < ch.length; i++) { const v = ch[i]; buf[n++] = v; const a = v < 0 ? -v : v; if (a > peak) peak = a; if (n === buf.length) flush(); }
+  };
+  sp.port = port;
+  return sp;
+}
+// release the microphone when the app is closed or hidden (iPhone home-screen apps sometimes keep it stuck otherwise)
+window.addEventListener('pagehide', () => { if (rec.active && rec.stream) { try { rec.stream.getTracks().forEach((t) => t.stop()); } catch (e) { /* ignore */ } } });
+function micTroubleModal(afterTake) {
+  const standalone = window.navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+  infoModal('マイクの音が入っていません', (afterTake ? '録音は無音だったので保存しませんでした。' : '') +
+    (standalone
+      ? 'ホーム画面から開いたアプリでは、iPhone側の不具合でマイクが無音になることがあります。次の順に試してください。<br>① アプリを上にスワイプして完全に閉じて開き直す<br>② だめならiPhoneを再起動<br>③ それでもだめなら、Safariで同じアドレスを開いて録音（録音したプロジェクトは「⋯ → ファイルAppに保存」→ アプリ側の「バックアップを読み込む」で移せます）'
+      : 'アプリを閉じて開き直すか、Bluetoothイヤホンを外してもう一度お試しください。「⋯ → 録音の設定 → マイクのテスト」でも確認できます。'));
+}
 async function micTest() {
   if (rec.active) return;
   busy('マイクのテスト中… 何か声を出してください', 0);
@@ -3092,6 +3149,9 @@ function recordSettings() {
         h('div', { class: 'lbl-line' }, '使うマイク'),
         micBox,
         h('button', { class: 'big-btn', onclick: micTest }, '🎤 マイクのテスト（3秒）'),
+        h('div', { class: 'lbl-line' }, '録音方式'),
+        chips([['', '標準'], ['sp', '互換']], settings.captureMode || '', (v) => { settings.captureMode = v; saveSettings(); render(); }),
+        h('p', { class: 'note', style: 'margin:2px 0 8px' }, 'ホーム画面のアプリで録音が無音になるときは「互換」にしてください（無音を検知したときは自動で「互換」に切り替わります）。'),
         h('p', { class: 'note' }, '音質のコツ：AirPodsなどBluetoothイヤホンを付けたまま録ると、iPhoneが「通話用の低音質マイク」に切り替わり、伴奏も声もこもります。有線イヤホン（またはLightning/USB-C変換）＋「iPhoneのマイク」がいちばんきれいに録れます。録音中は画面の再生処理を軽くして音飛びを防いでいます。'),
         h('div', { class: 'actions' }, h('button', { class: 'big-btn ghost', onclick: close }, '閉じる')));
     };
