@@ -30,7 +30,7 @@ function cleaned(e, c, prog) {
   const info = {};
   if (c.nr) {
     const prof = c.profile ? [Math.round(c.profile[0] * e.sr), Math.round(c.profile[1] * e.sr)] : null;
-    const r = DSP.denoise(y, e.sr, { auto: c.auto, reduceDb: c.reduceDb, sens: c.sens, profile: prof }, (p) => prog && prog(p * 0.6));
+    const r = DSP.denoise(y, e.sr, { auto: c.auto, level: c.level, reduceDb: c.reduceDb, sens: c.sens, gate: c.gate, profile: prof }, (p) => prog && prog(p * 0.6));
     y = r.y; info.noiseDb = r.noiseDb; info.snr = r.snr; info.reduceDb = r.reduceDb;
   }
   if (c.click > 0) {
@@ -135,6 +135,7 @@ self.onmessage = (ev) => {
         let L = m.L, R = m.R;
         const sr = m.sr;
         if (msg.mode === 'measure') { reply({ ok: true, lufs: DSP.loudness([L, R], sr) }); break; }
+        if (msg.mode === 'profile') { reply({ ok: true, lufs: DSP.loudness([L, R], sr), profile: DSP.bandProfile([L, R], sr) }); break; }
         let last = L.length - 1;
         const spanN = Math.round((msg.span || 0) * sr);
         while (last > spanN && Math.abs(L[last]) < 1e-4 && Math.abs(R[last]) < 1e-4) last--;

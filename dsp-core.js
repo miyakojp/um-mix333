@@ -740,6 +740,43 @@
     };
   }
   DSP.makeFFT = makeFFT;
+  // Long-term tone profile of a sound (used by AI MIX): energy in 7 bands (dB, relative to the whole),
+  // plus how much the level moves (dyn, dB). Only the parts where something sounds are counted.
+  // bands: 0 sub(<80) 1 low(80-200) 2 low-mid(200-500) 3 mid(500-2k) 4 presence(2-5k) 5 sibilance(5-9k) 6 air(9-16k)
+  DSP.BAND_EDGES = [20, 80, 200, 500, 2000, 5000, 9000, 16000];
+  DSP.bandProfile = function (chs, sr, from, to) {
+    const N = 4096, fft = makeFFT(N), E = DSP.BAND_EDGES;
+    const a = chs[0], b = chs.length > 1 ? chs[1] : null;
+    const s0 = Math.max(0, Math.round((from || 0) * sr)), s1 = Math.min(a.length, to ? Math.round(to * sr) : a.length);
+    const total = Math.max(0, Math.floor((s1 - s0) / N));
+    if (total < 4) return null;
+    const step = Math.max(1, Math.floor(total / 500));
+    const win = new Float32Array(N); for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N);
+    const re = new Float64Array(N), im = new Float64Array(N);
+    const frames = [];
+    for (let f = 0; f < total; f += step) {
+      const st = s0 + f * N; let e = 0;
+      for (let i = 0; i < N; i++) { const v = b ? 0.5 * (a[st + i] + b[st + i]) : a[st + i]; re[i] = v * win[i]; im[i] = 0; e += v * v; }
+      const rms = Math.sqrt(e / N);
+      if (rms < 1e-5) continue;
+      fft(re, im);
+      const bands = new Float64Array(7);
+      for (let k = 1; k < N / 2; k++) {
+        const fr = k * sr / N; if (fr < E[0] || fr >= E[7]) continue;
+        let q = 0; while (fr >= E[q + 1]) q++;
+        bands[q] += re[k] * re[k] + im[k] * im[k];
+      }
+      frames.push({ rms, bands });
+    }
+    if (frames.length < 4) return null;
+    const mx = frames.reduce((m, f) => Math.max(m, f.rms), 0);
+    const act = frames.filter((f) => f.rms > mx * 0.0316);
+    const sum = new Float64Array(7); let tot = 0;
+    for (const f of act) for (let q = 0; q < 7; q++) { sum[q] += f.bands[q]; tot += f.bands[q]; }
+    const lv = act.map((f) => 20 * Math.log10(f.rms)).sort((x, y) => x - y);
+    const pc = (p) => lv[Math.min(lv.length - 1, Math.floor(lv.length * p))];
+    return { bands: Array.from(sum, (v) => 10 * Math.log10(v / (tot + 1e-30) + 1e-12)), dyn: pc(0.95) - pc(0.3), level: pc(0.7) };
+  };
   // WAV writer in small parts (no single huge allocation)
   DSP.encodeWav = function encodeWav(channels, sampleRate, bits) {
     const nCh = channels.length, n = channels[0].length;
@@ -806,6 +843,12 @@
 
   // ---------- spectral noise reduction ----------
   // opts: {reduceDb, sens (0..1), auto, profile: [startSample, endSample] | null}
+  // Noise reduction v2:
+  //  - the noise "fingerprint" comes from the quietest moments, and its level is then followed over time
+  //    in 24 frequency bands (so a fan / air conditioner / street noise that changes is still tracked)
+  //  - Wiener-style gain with decision-directed smoothing (far less "watery" artefacts than plain subtraction)
+  //  - a soft gate makes the gaps between phrases quieter still (with look-ahead and hold so words are not chopped)
+  //  - rumble below ~55 Hz is removed
   DSP.denoise = function (x, sr, opts, progress) {
     const N = sr > 60000 ? 2048 : 1024, hop = N / 4, nb = N / 2 + 1;
     const fft = makeFFT(N);
@@ -819,65 +862,129 @@
       const st = frameStart(f);
       for (let i = 0; i < N; i++) { const j = st + i; re[i] = j >= 0 && j < len ? x[j] * win[i] : 0; im[i] = 0; }
     };
-    // 1) choose noise frames
-    let chosen = [];
-    const en = new Float64Array(F);
-    for (let f = 0; f < F; f++) {
-      const st = frameStart(f);
-      let e = 0, c = 0;
-      for (let i = 0; i < N; i += 4) { const j = st + i; if (j >= 0 && j < len) { e += x[j] * x[j]; c++; } }
-      en[f] = c ? e / c : 0;
+    // frequency bands (log spaced)
+    const NB = 24, bandOf = new Uint8Array(nb), fLo = 50, fHi = sr / 2;
+    for (let b = 0; b < nb; b++) {
+      const f = Math.max(fLo, b * sr / N);
+      bandOf[b] = Math.min(NB - 1, Math.floor(NB * Math.log(f / fLo) / Math.log(fHi / fLo)));
     }
+    const cutBin = Math.ceil(55 * N / sr);
+    // pass 1: frame energy + band amplitudes
+    const en = new Float64Array(F), bandA = new Float32Array(F * NB);
+    const tmp = new Float64Array(NB);
+    for (let f = 0; f < F; f++) {
+      load(f); fft(re, im);
+      tmp.fill(0);
+      let e = 0;
+      for (let b = cutBin; b < nb; b++) { const p2 = re[b] * re[b] + im[b] * im[b]; tmp[bandOf[b]] += p2; e += p2; }
+      en[f] = e;
+      for (let k = 0; k < NB; k++) bandA[f * NB + k] = Math.sqrt(tmp[k]);
+      if (progress && (f & 255) === 0) progress(0.35 * f / F);
+    }
+    let chosen = [];
     if (opts.profile) {
       for (let f = 0; f < F; f++) { const st = frameStart(f); if (st >= opts.profile[0] && st + N <= opts.profile[1]) chosen.push(f); }
     }
     const active = [];
     for (let f = 0; f < F; f++) if (en[f] > 1e-12) active.push(f);
+    if (!active.length) return { y: Float32Array.from(x), noiseDb: -120, snr: 99 };
     active.sort((a, b) => en[a] - en[b]);
     if (!chosen.length) chosen = active.slice(0, Math.max(4, Math.floor(active.length * 0.08)));
-    if (!active.length) return { y: Float32Array.from(x), noiseDb: -120, snr: 99 };
-    const prof = new Float64Array(nb);
+    // fine fingerprint from the chosen frames
+    const prof = new Float64Array(nb), profBand = new Float64Array(NB);
     let nE = 0;
     for (const f of chosen) {
       load(f); fft(re, im);
       for (let b = 0; b < nb; b++) prof[b] += Math.hypot(re[b], im[b]);
-      nE += en[f];
+      for (let k = 0; k < NB; k++) profBand[k] += bandA[f * NB + k];
+      const st = frameStart(f); let e = 0, c = 0;
+      for (let i = 0; i < N; i += 4) { const j = st + i; if (j >= 0 && j < len) { e += x[j] * x[j]; c++; } }
+      nE += c ? e / c : 0;
     }
     for (let b = 0; b < nb; b++) prof[b] /= chosen.length;
+    for (let k = 0; k < NB; k++) profBand[k] = profBand[k] / chosen.length + 1e-12;
     const noiseDb = 10 * Math.log10(nE / chosen.length + 1e-20);
-    const medE = en[active[Math.floor(active.length * 0.6)]];
-    const snr = 10 * Math.log10((medE + 1e-20) / (nE / chosen.length + 1e-20));
-    let reduceDb = opts.reduceDb, sens = opts.sens;
-    if (opts.auto) {
-      reduceDb = noiseDb < -75 ? 6 : noiseDb < -62 ? 10 : noiseDb < -50 ? 14 : 18;
-      sens = 0.45;
-      if (snr < 12) { reduceDb = Math.min(reduceDb, 6); sens = 0.2; }
+    let sigE = 0; { const f = active[Math.floor(active.length * 0.6)]; const st = frameStart(f); let e = 0, c = 0; for (let i = 0; i < N; i += 4) { const j = st + i; if (j >= 0 && j < len) { e += x[j] * x[j]; c++; } } sigE = c ? e / c : 0; }
+    const snr = 10 * Math.log10((sigE + 1e-20) / (nE / chosen.length + 1e-20));
+    // follow the noise level over time: minimum of the smoothed band amplitude in ~0.5 s blocks, +-4 blocks
+    const BL = Math.max(8, Math.round(0.5 * sr / hop)), nBlk = Math.ceil(F / BL);
+    const blkMin = new Float32Array(nBlk * NB).fill(1e30);
+    for (let k = 0; k < NB; k++) {
+      let acc = 0;
+      for (let f = 0; f < F; f++) {
+        acc += bandA[f * NB + k]; if (f >= 5) acc -= bandA[(f - 5) * NB + k];
+        if (f >= 4) { const v = acc / 5, q = Math.floor(f / BL) * NB + k; if (v < blkMin[q]) blkMin[q] = v; }
+      }
     }
-    const floor = Math.pow(10, -reduceDb / 20), over = 1 + sens * 1.6;
-    // 2) process
+    const locMin = (blk, k) => { let m = 1e30; for (let q = Math.max(0, blk - 2); q <= Math.min(nBlk - 1, blk + 2); q++) { const v = blkMin[q * NB + k]; if (v < m) m = v; } return m; };
+    const ref = new Float64Array(NB);
+    for (let k = 0; k < NB; k++) {
+      const vals = chosen.map((f) => locMin(Math.floor(f / BL), k)).filter((v) => v < 1e29).sort((p, q) => p - q);
+      ref[k] = vals.length ? vals[vals.length >> 1] + 1e-12 : 1e-12;
+    }
+    const track = !opts.profile; // a hand-picked noise sample is used as it is
+    const ratio = new Float32Array(nBlk * NB).fill(1);
+    if (track) for (let q = 0; q < nBlk; q++) for (let k = 0; k < NB; k++) { const m = locMin(q, k); ratio[q * NB + k] = m > 1e29 ? 1 : Math.max(0.6, Math.min(3, m / ref[k])); }
+    // strength
+    let reduceDb = opts.reduceDb, sens = opts.sens, gateDb = opts.gate || 0;
+    if (opts.auto) {
+      const L = Math.max(0, Math.min(2, opts.level || 0));
+      reduceDb = (noiseDb < -75 ? 8 : noiseDb < -62 ? 14 : noiseDb < -50 ? 18 : 22) + 6 * L;
+      sens = 0.45 + 0.3 * L;
+      gateDb = (noiseDb < -80 ? 4 : 8) + 6 * L;
+      if (snr < 12) { reduceDb = Math.min(reduceDb, 8 + 4 * L); sens = 0.2 + 0.2 * L; gateDb = Math.min(gateDb, 6); }
+    }
+    const floor = Math.pow(10, -reduceDb / 20), mu = 0.6 + sens * 2.2;
+    // gate: decide per frame from the voice-band SNR (known from pass 1), with look-ahead and hold
+    const gate = new Float32Array(F).fill(1);
+    if (gateDb > 0) {
+      const gFloor = Math.pow(10, -gateDb / 20);
+      const k0 = bandOf[Math.round(150 * N / sr)], k1 = bandOf[Math.min(nb - 1, Math.round(6000 * N / sr))];
+      const open = new Float32Array(F);
+      for (let f = 0; f < F; f++) {
+        const q = Math.floor(f / BL); let s2 = 0, n2 = 0;
+        for (let k = k0; k <= k1; k++) { const a = bandA[f * NB + k], n = profBand[k] * ratio[q * NB + k]; s2 += a * a; n2 += n * n; }
+        const r = s2 / (n2 + 1e-20);                       // 1 = only noise
+        open[f] = Math.max(0, Math.min(1, (r - 2.2) / 4)); // fully open from ~8 dB above the noise
+      }
+      const LA = Math.round(0.03 * sr / hop), HOLD = Math.round(0.14 * sr / hop);
+      let held = 0, cur = 0;
+      for (let f = 0; f < F; f++) {
+        let o = 0; for (let j = f; j <= Math.min(F - 1, f + LA); j++) if (open[j] > o) o = open[j];
+        if (o >= cur) { cur = o; if (o > 0.5) held = HOLD; }
+        else if (held > 0) held--;
+        else cur = cur * 0.9 + o * 0.1;
+        gate[f] = gFloor + (1 - gFloor) * cur;
+      }
+    }
+    // pass 2: process
     const out = new Float32Array(len);
-    const prevG = new Float32Array(nb).fill(1), g = new Float32Array(nb), g2 = new Float32Array(nb);
+    const prevG = new Float32Array(nb).fill(1), prevPost = new Float32Array(nb).fill(1), g = new Float32Array(nb);
+    const AL = 0.9;
     for (let f = 0; f < F; f++) {
       load(f); fft(re, im);
+      const q = Math.floor(f / BL) * NB, gf = gate[f];
       for (let b = 0; b < nb; b++) {
-        const mag = Math.hypot(re[b], im[b]);
-        g[b] = Math.max(floor, 1 - over * prof[b] / (mag + 1e-12));
+        if (b < cutBin) { g[b] = 0; continue; }
+        const n = prof[b] * ratio[q + bandOf[b]];
+        const post = (re[b] * re[b] + im[b] * im[b]) / (n * n + 1e-24);
+        const prio = AL * prevG[b] * prevG[b] * prevPost[b] + (1 - AL) * Math.max(post - 1, 0);
+        let gg = prio / (prio + mu);
+        if (gg < floor) gg = floor;
+        prevG[b] = gg; prevPost[b] = post;
+        g[b] = gg;
       }
       for (let b = 0; b < nb; b++) {
-        const v = (g[Math.max(0, b - 1)] + g[b] + g[Math.min(nb - 1, b + 1)]) / 3;
-        const sm = v >= prevG[b] ? v : prevG[b] * 0.6 + v * 0.4;
-        prevG[b] = sm; g2[b] = sm;
-      }
-      for (let b = 0; b < nb; b++) {
-        re[b] *= g2[b]; im[b] *= g2[b];
-        if (b > 0 && b < N / 2) { re[N - b] *= g2[b]; im[N - b] *= g2[b]; }
+        const v = b < cutBin ? 0 : (g[Math.max(cutBin, b - 1)] * 0.25 + g[b] * 0.5 + g[Math.min(nb - 1, b + 1)] * 0.25) * gf;
+        re[b] *= v; im[b] *= v;
+        if (b > 0 && b < N / 2) { re[N - b] *= v; im[N - b] *= v; }
       }
       fft(re, im, true);
       const st = frameStart(f);
       for (let i = 0; i < N; i++) { const j = st + i; if (j >= 0 && j < len) out[j] += re[i] * win[i] / 1.5; }
-      if (progress && (f & 255) === 0) progress(f / F);
+      if (progress && (f & 255) === 0) progress(0.35 + 0.65 * f / F);
     }
-    return { y: out, noiseDb, snr, reduceDb };
+    return { y: out, noiseDb, snr, reduceDb, gateDb };
   };
 
   // ---------- lip noise / click removal ----------

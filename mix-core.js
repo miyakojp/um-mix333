@@ -44,7 +44,10 @@
         lp = lp * a + rnd() * (1 - a);
         let er = 0;
         if (tt < 0.08) er = (Math.abs(rnd()) > 0.985 ? rnd() * 2.5 : 0);
-        d[i] = (lp * 1.6 + er) * env;
+        // smooth build-up (no harsh burst at the start) and a soft fade at the very end (no cut-off tail)
+      const rise = 1 - Math.exp(-tt / (type === 'hall' ? 0.012 : type === 'plate' ? 0.003 : 0.005));
+      const tailFade = Math.min(1, (len - i) / (0.08 * sr));
+      d[i] = (lp * 1.6 * rise + er) * env * tailFade;
       }
       out.push(d);
     }

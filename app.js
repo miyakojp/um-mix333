@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
 import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT, flatFx, groupCfg } from './audio-engine.js';
-export const APP_VERSION = 'v18';
+export const APP_VERSION = 'v19';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -227,7 +227,7 @@ function needsProcessing(tr) {
 }
 function cleanParams(tr) {
   const c = tr.clean;
-  return { nr: true, auto: c.auto, reduceDb: c.reduceDb, sens: c.sens, click: c.auto ? (c.autoClick != null ? c.autoClick : 0.5) : c.click, breath: c.auto ? (c.autoBreath || 0) : c.breath, profile: c.profile };
+  return { nr: true, v: 2, auto: c.auto, level: c.autoLevel || 0, reduceDb: c.reduceDb, sens: c.sens, gate: c.gate || 0, click: c.auto ? (c.autoClick != null ? c.autoClick : 0.5) : c.click, breath: c.auto ? (c.autoBreath != null ? c.autoBreath : 6) : c.breath, profile: c.profile };
 }
 function curvesFor(tr, an, extraNotes) {
   return DSP.noteCurves(an, extraNotes || tr.pitch.notes || [], { transitionMs: tr.pitch.transitionMs, cuts: tr.cuts, tune: tr.pitch.tuneOn ? tr.pitch.tune : null, key: project.key });
@@ -2392,14 +2392,16 @@ function buildCleanTab(body, tr) {
   body.append(chips([[true, 'おまかせ'], [false, '手動']], c.auto, (v) => { c.auto = v; apply(); renderSheet(); }, 'accent'));
   const clickFmt = (v) => v === 0 ? 'オフ' : v <= 0.5 ? '標準' + (v < 0.5 ? '（弱）' : '') : v <= 1 ? '強' : '最強';
   if (c.auto) {
-    body.append(h('p', { class: 'note', style: 'margin:2px 0 6px' }, 'さらに抑えたいときは右へ。'),
-      slider({ label: 'ブレスを抑える', min: 0, max: 36, step: 1, value: c.autoBreath || 0, fmt: (v) => v === 0 ? 'そのまま' : '−' + v + ' dB', oninput: (v) => { c.autoBreath = v; }, onchange: apply }),
+    body.append(h('p', { class: 'note', style: 'margin:2px 0 6px' }, 'エアコン・部屋の音などの環境音は、歌っていない所から自動で覚えて、曲の途中で変わっても追いかけて消します。さらに抑えたいときは右へ。'),
+      slider({ label: '環境音カット', min: 0, max: 2, step: 0.5, value: c.autoLevel || 0, fmt: (v) => v === 0 ? '標準' : v <= 1 ? '強' : '最強', oninput: (v) => { c.autoLevel = v; }, onchange: apply }),
+      slider({ label: 'ブレスを抑える', min: 0, max: 36, step: 1, value: c.autoBreath != null ? c.autoBreath : 6, fmt: (v) => v === 0 ? 'そのまま' : '−' + v + ' dB', oninput: (v) => { c.autoBreath = v; }, onchange: apply }),
       slider({ label: 'リップノイズ', min: 0, max: 1.3, step: 0.05, value: c.autoClick != null ? c.autoClick : 0.5, fmt: clickFmt, oninput: (v) => { c.autoClick = v; }, onchange: apply }));
     return;
   }
   body.append(section('環境ノイズ', true,
     slider({ label: '低減量', min: 0, max: 30, step: 1, value: c.reduceDb, fmt: (v) => v + ' dB', oninput: (v) => { c.reduceDb = v; }, onchange: apply }),
     slider({ label: '感度', min: 0, max: 1, step: 0.05, value: c.sens, fmt: fmtPct, oninput: (v) => { c.sens = v; }, onchange: apply }),
+    slider({ label: '無音部分を静かに', min: 0, max: 24, step: 1, value: c.gate || 0, fmt: (v) => v === 0 ? 'オフ' : '−' + v + ' dB', oninput: (v) => { c.gate = v; }, onchange: apply }),
     h('div', { class: 'note' }, c.profile ? `学習：${c.profile[0].toFixed(1)}〜${c.profile[1].toFixed(1)}秒` : '学習：自動（静かな部分）'),
     h('div', { class: 'mini-btns grid2', style: 'margin:8px 0' },
       h('button', { onclick: () => {
@@ -2687,6 +2689,7 @@ function editMemo() {
 // ---------------- auto MIX ----------------
 // Style templates modelled on common 歌ってみた / VTuber mix tendencies (no specific artist).
 const AUTO_MIX = {
+  ai: { ai: true, name: '🤖 AI MIX', desc: '声と音源を解析して、この曲専用の設定を作る', main: 'pop', harm: 'harm_wide', back: 'b_space', gv: 'gv_front', gb: 'gb_space', gm: 'gm_video', reverb: 'plate', delay: '1/8', fb: 0.28, pp: true, center: 0.8, drift: 0.3, lu: 1.5, harmony: true, duck: 2.5 },
   power: { name: 'ハイトーン歌い手', desc: '張りのある高音を前に出し、音源となじませる', main: 'power', harm: 'harm_bright', back: 'b_space', gv: 'gv_front', gb: 'gb_space', gm: 'gm_video', reverb: 'plate', delay: '1/8.', fb: 0.3, pp: true, center: 0.85, drift: 0.3, lu: 1.8, harmony: true, duck: 3 },
   airy: { name: '透明感・エモ歌い手', desc: '広い響きと空気感、繊細なハモリ', main: 'airy', harm: 'harm_wide', back: 'b_space', gv: 'gv_shine', gb: 'gb_space', gm: 'gm_video', reverb: 'hall', delay: '1/4', fb: 0.32, pp: true, center: 0.85, drift: 0.3, lu: 1.5, harmony: true, duck: 2.5 },
   vtuber: { name: 'VTuber王道', desc: 'キラキラ明るく、歌が主役', main: 'vtuber', harm: 'harm_bright', back: 'b_space', gv: 'gv_front', gb: 'gb_space', gm: 'gm_loud', reverb: 'plate', delay: '1/8', fb: 0.3, pp: true, center: 0.85, drift: 0.3, lu: 1.5, harmony: true, duck: 2.5 },
@@ -2705,19 +2708,100 @@ function mixRestore(sn) {
   for (const s0 of sn.tracks) { const t = project.tracks.find((x) => x.id === s0.id); if (t) Object.assign(t, { fx: s0.fx, vol: s0.vol, pan: s0.pan, clipGain: s0.clipGain }); }
   project.groups = sn.groups; project.bus = sn.bus;
 }
-async function applyMixPreview(key, sn) {
-  const tpl = AUTO_MIX[key];
+// ---------------- AI MIX ----------------
+// Listens to (analyses) the voice and the backing on this device and decides the settings for this song:
+// tone (EQ), de-esser, compressor, reverb / delay for the tempo, how much the backing makes room, balance.
+// Nothing is sent anywhere. Optionally matches the overall tone / loudness of a reference song file.
+const chsOf = (b) => (b.numberOfChannels > 1 ? [b.getChannelData(0), b.getChannelData(1)] : [b.getChannelData(0)]);
+const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
+const r05 = (v) => Math.round(v * 2) / 2;
+function aiTune(opt = {}) {
+  const notes = [];
+  const bpm = project.bus.bpm || 120;
+  const G = project.groups;
+  let lu = 1.5;
+  const back = project.tracks.find((t) => t.kind === 'backing' && t.audioId && !t.mute) || project.tracks.find((t) => t.kind === 'backing' && t.audioId);
+  let bp = null;
+  if (back) { const b = buffers.get(back.audioId); bp = b ? DSP.bandProfile(chsOf(b), b.sampleRate) : null; }
+  if (!opt.keepFx) {
+    for (const tr of project.tracks) {
+      if (tr.kind !== 'vocal' || !tr.audioId) continue;
+      const b = bufferFor(tr), vp = b ? DSP.bandProfile(chsOf(b), b.sampleRate) : null;
+      if (!vp || !tr.fx.eq || tr.fx.eq.length < 4) continue;
+      const fx = tr.fx, v = vp.bands;
+      const mud = v[2] - v[3], pres = v[4] - v[3], air = v[6] - v[3], sib = v[5] - v[4];
+      const an = analyses.get(tr.audioId);
+      if (an) {
+        const f = Array.from(an.f0).filter((x) => x > 50).sort((p, q) => p - q);
+        if (f.length > 20) { fx.hpf = clampN(Math.round(f[Math.floor(f.length * 0.1)] * 0.6 / 5) * 5, 70, 160); notes.push(`いちばん低い音に合わせて ${fx.hpf}Hz より下をカット`); }
+      }
+      fx.eq[0].f = 300; fx.eq[0].g = r05(clampN(-1 - mud * 0.6, -6, -1));
+      fx.eq[1].g = mud > 4 ? -1 : 0;
+      fx.eq[2].f = 3200; fx.eq[2].g = r05(clampN(1.5 + (-6 - pres) * 0.45, 0.5, 5));
+      fx.eq[3].f = 12000; fx.eq[3].g = r05(clampN(2.5 + (-22 - air) * 0.25, 1, 6));
+      fx.deess = { f: 6800, amount: Math.round(clampN(0.45 + (sib + 8) * 0.04 + fx.eq[3].g * 0.03, 0.3, 0.85) * 100) / 100 };
+      fx.comp = { on: true, threshold: Math.round(clampN(-20 - vp.dyn * 0.7, -34, -20)), ratio: r05(clampN(2.5 + vp.dyn * 0.18, 3, 6)), attack: 8, release: 80, knee: 6 };
+      fx.sat = 0.15; fx.doubler = 0.12;
+      fx.rev = bpm >= 150 ? 0.16 : bpm >= 100 ? 0.2 : 0.28; fx.dly = bpm >= 150 ? 0.1 : bpm >= 100 ? 0.14 : 0.16;
+      fx.preset = 'custom_ai';
+      notes.push(`声の質：こもり ${fx.eq[0].g}dB／抜け +${fx.eq[2].g}dB／空気感 +${fx.eq[3].g}dB`);
+      notes.push(`声の大小の差 ${vp.dyn.toFixed(0)}dB → コンプ ${fx.comp.ratio}:1、歯擦音の抑え ${Math.round(fx.deess.amount * 100)}%`);
+    }
+    project.bus.reverb.type = bpm >= 150 ? 'room' : bpm >= 100 ? 'plate' : 'hall';
+    project.bus.delay.note = bpm >= 150 ? '1/8' : bpm >= 100 ? '1/8.' : '1/4';
+    project.bus.delay.feedback = bpm >= 150 ? 0.22 : bpm >= 100 ? 0.28 : 0.3;
+    notes.push(`テンポ ${Math.round(bpm)} → 響きは「${REVERB_TYPES[project.bus.reverb.type].name}」`);
+  }
+  if (bp) {
+    const dens = bp.bands[4] - bp.bands[3];
+    G.backing.duck = r05(clampN(2.5 + (dens + 8) * 0.3, 1.5, 4.5));
+    lu = clampN(1.5 + (dens + 8) * 0.1 + (bp.dyn < 6 ? 0.3 : 0), 1, 2.3);
+    if (!opt.keepFx && back.fx.eq && back.fx.eq.length >= 4) back.fx.eq[2].g = r05(clampN(-1 - (dens + 8) * 0.25, -3.5, -0.5));
+    notes.push(`音源の密度に合わせて「なじませ」${G.backing.duck}dB・歌を ${lu.toFixed(1)}LU 前に`);
+  }
+  return { notes, lu };
+}
+async function loadReference(file) {
+  const ab = await file.arrayBuffer();
+  const buf = await engine.ensure().decodeAudioData(ab);
+  const chs = chsOf(buf);
+  const profile = DSP.bandProfile(chs, buf.sampleRate);
+  if (!profile) throw new Error('参考曲が短すぎます');
+  return { name: file.name.replace(/\.[^.]+$/, '').slice(0, 30), bands: profile.bands, lufs: DSP.loudness(chs, buf.sampleRate) };
+}
+async function matchReference(ref) {
+  const eq = project.groups.master.fx.eq;
+  if (!ref || !eq || eq.length < 4) return null;
+  const r = await renderJS((t) => !t.mute, { sr: 32000, from: vocalWindowStart(), maxSec: 40, noTail: true, end: { mode: 'profile' } });
+  if (!r || !r.profile) return null;
+  const o = r.profile.bands, f = ref.bands;
+  const d = (k) => (f[k] - f[3]) - (o[k] - o[3]);
+  for (const [i, k, lim] of [[0, 1, 3], [1, 2, 3], [2, 4, 3], [3, 6, 4]]) eq[i].g = r05(clampN(eq[i].g + clampN(0.6 * d(k), -lim, lim), -6, 6));
+  project.groups.master.fx.preset = 'custom_ai';
+  project.exportFinal = ref.lufs > -10.5 ? 'loud' : ref.lufs > -13 ? 'video' : 'stream';
+  engine.updateGroups(project);
+  return `参考曲「${ref.name}」の音色（低音・高音のバランス）と音の大きさ（${ref.lufs.toFixed(1)} LUFS）に寄せました`;
+}
+function applyTplFx(tr, tpl, opt) {
+  if (opt.keepFx) return;                       // keep the effects the user set
+  const color = tr.fx && tr.fx.color;
+  tr.fx = fxFromPreset(tr.kind === 'backing' ? tpl.back : tr.kind === 'vocal' ? tpl.main : tpl.harm);
+  if (color && color.type !== 'none' && color.mix > 0) tr.fx.color = color; // a voice effect chosen by the user stays
+}
+async function applyMixPreview(key, sn, opt = {}) {
+  let tpl = AUTO_MIX[key];
   mixRestore(clone(sn));
   for (const tr of project.tracks) {
     if (!tr.audioId) continue;
-    if (tr.kind === 'backing') { tr.fx = fxFromPreset(tpl.back); tr.vol = 0; }
-    else { tr.fx = fxFromPreset(tr.kind === 'vocal' ? tpl.main : tpl.harm); if (tr.kind === 'vocal') tr.vol = 0; }
+    applyTplFx(tr, tpl, opt);
+    if (tr.kind !== 'harmony') tr.vol = 0;
     await autoLevel(tr, true);
   }
   project.tracks.filter((t) => t.kind === 'harmony').forEach((t, i) => { t.pan = i % 2 ? 0.35 : -0.35; t.vol = -6; });
   const G = project.groups;
   G.vocal.fx = fxFromPreset(tpl.gv); G.backing.fx = fxFromPreset(tpl.gb); G.master.fx = fxFromPreset(tpl.gm); G.master.limiter = true; G.master.vol = 0; G.backing.duck = tpl.duck || 0;
-  project.bus.reverb.type = tpl.reverb; project.bus.delay.note = tpl.delay; project.bus.delay.feedback = tpl.fb; project.bus.delay.pingpong = tpl.pp;
+  if (!opt.keepFx) { project.bus.reverb.type = tpl.reverb; project.bus.delay.note = tpl.delay; project.bus.delay.feedback = tpl.fb; project.bus.delay.pingpong = tpl.pp; }
+  if (tpl.ai) { const a = aiTune(opt); tpl = Object.assign({}, tpl, { lu: a.lu }); }
   const hasB = project.tracks.some((t) => t.kind === 'backing' && t.audioId && !t.mute);
   if (hasB) {
     const from = vocalWindowStart();
@@ -2729,7 +2813,7 @@ async function applyMixPreview(key, sn) {
 function autoMixSheet() {
   if (!project.tracks.some((t) => t.kind === 'vocal' && t.audioId)) { toast('メインボーカルの音声が必要です'); return; }
   stopAll(); bgStop();
-  const st = { tpl: null, clean: true, pitch: true, harm: null, token: 0, loading: false };
+  const st = { tpl: null, clean: true, pitch: true, harm: null, token: 0, loading: false, keepFx: false, ref: null };
   const snap = mixSnapshot();
   const startPos = Math.max(0, vocalWindowStart() - 1.5);
   previewing = true;
@@ -2747,7 +2831,7 @@ function autoMixSheet() {
   const choose = async (k, render) => {
     st.tpl = k; st.harm = null; st.loading = true; render();
     const my = ++st.token;
-    try { await applyMixPreview(k, snap); } catch (e) { console.error(e); }
+    try { await applyMixPreview(k, snap, { keepFx: st.keepFx }); } catch (e) { console.error(e); }
     if (my !== st.token) return;
     st.loading = false;
     engine.ensure();
@@ -2769,18 +2853,27 @@ function autoMixSheet() {
           h('span', { class: 'pv-state' }, state),
           tpl ? h('button', { class: 'pill', onclick: () => { if (engine.playing) { engine.stop(); updateTransportUI(); } else { engine.ensure(); playFrom(startPos, null); } render(); } }, engine.playing ? '■ 停止' : '▶ 試聴') : null),
         h('p', { class: 'note' }, '試聴ではエフェクト・音量バランスの雰囲気を確認できます（ピッチ補正・ノイズ除去・ハモリ作成は確定後に反映されます）。'),
+        tpl ? switchRow('今のエフェクト設定を残す', st.keepFx, (v) => { st.keepFx = v; choose(st.tpl, render); }) : null,
+        tpl ? h('p', { class: 'note', style: 'margin:-2px 0 6px' }, st.keepFx ? '各トラックのエフェクトはそのまま。音量・バランス・全体の仕上げだけ合わせます。' : '部分FX（✨）と、自分で選んだ声の加工（電話・ロボなど）は、どちらの場合も残ります。') : null,
+        tpl && tpl.ai ? h('div', { class: 'mini-btns', style: 'margin:0 0 8px' }, h('button', { onclick: () => {
+          const inp = h('input', { type: 'file', accept: 'audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac' });
+          inp.onchange = async () => { const f = inp.files[0]; if (!f) return; busy('参考曲を解析中…'); try { st.ref = await loadReference(f); } catch (e) { toast('参考曲を読み込めませんでした'); } busy(false); render(); };
+          inp.click();
+        } }, st.ref ? `参考曲：${st.ref.name}（${st.ref.lufs.toFixed(1)} LUFS）` : '🎧 参考曲に寄せる（任意・音声ファイルを選ぶ）')) : null,
+        tpl && tpl.ai ? h('p', { class: 'note', style: 'margin:-2px 0 6px' }, '手元にある「こういう音にしたい」曲のファイルを選ぶと、全体の音色と音の大きさをそれに近づけます。') : null,
         tpl ? switchRow('ノイズ・リップノイズ除去', st.clean, (v) => { st.clean = v; }) : null,
         tpl ? switchRow(tpl.tune ? 'オートチューン（ケロケロ）' : 'ピッチ補正', st.pitch, (v) => { st.pitch = v; }) : null,
         tpl ? switchRow('ハモリも作る（3度上）', harmOn, (v) => { st.harm = v; }) : null,
         h('div', { class: 'actions' },
-          h('button', { class: 'big-btn primary', disabled: !tpl || st.loading ? '' : null, onclick: () => { if (!tpl || st.loading) return; const k = st.tpl, opt = { clean: st.clean, pitch: st.pitch, harm: harmOn }; finish({ tpl: k, opt }); close(); } }, tpl ? `「${tpl.name}」で確定` : 'スタイルを選んでください'),
+          h('button', { class: 'big-btn primary', disabled: !tpl || st.loading ? '' : null, onclick: () => { if (!tpl || st.loading) return; const k = st.tpl, opt = { clean: st.clean, pitch: st.pitch, harm: harmOn, keepFx: st.keepFx, ref: st.ref }; finish({ tpl: k, opt }); close(); } }, tpl ? `「${tpl.name}」で確定` : 'スタイルを選んでください'),
           h('button', { class: 'big-btn ghost', onclick: () => { close(); } }, 'キャンセル（元に戻す）')));
     };
     render();
   }, { onClose: () => finish(null) });
 }
 async function runAutoMix(key, opt) {
-  const tpl = AUTO_MIX[key];
+  let tpl = AUTO_MIX[key];
+  let aiNotes = [];
   stopAll(); bgStop();
   const done = [];
   try {
@@ -2794,8 +2887,8 @@ async function runAutoMix(key, opt) {
     if (project.key.auto) { busy('キーを判定中…', 0.32); await detectKey(true); refreshHead(); done.push(`キー ${keyLabel(project.key)}`); }
     for (const tr of project.tracks) {
       if (!tr.audioId) continue;
-      if (tr.kind === 'backing') { tr.fx = fxFromPreset(tpl.back); tr.vol = 0; continue; }
-      tr.fx = fxFromPreset(tr.kind === 'vocal' ? tpl.main : tpl.harm);
+      applyTplFx(tr, tpl, opt);
+      if (tr.kind === 'backing') { tr.vol = 0; continue; }
       if (opt.clean && !tr.harmonyOf) { tr.clean.on = true; tr.clean.auto = true; }
       if (tr.kind === 'vocal') {
         tr.vol = 0;
@@ -2810,30 +2903,44 @@ async function runAutoMix(key, opt) {
     if (opt.pitch) done.push(tpl.tune ? 'オートチューン' : 'ピッチ補正');
     if (opt.harm && mains[0] && project.tracks.length < MAX_TRACKS) {
       await generateHarmony(mains[0], [{ type: 'scale', steps: 2 }], true);
-      project.tracks.filter((t) => t.kind === 'harmony').forEach((t) => { t.fx = fxFromPreset(tpl.harm); });
+      project.tracks.filter((t) => t.kind === 'harmony' && t.harmonyOf === mains[0].id && !opt.keepFx).forEach((t) => { t.fx = fxFromPreset(tpl.harm); });
       done.push('ハモリ作成');
     }
     // harmonies: spread left / right
     project.tracks.filter((t) => t.kind === 'harmony').forEach((t, i) => { t.pan = i % 2 ? 0.35 : -0.35; t.vol = -6; });
     const G = project.groups;
     G.vocal.fx = fxFromPreset(tpl.gv); G.backing.fx = fxFromPreset(tpl.gb); G.master.fx = fxFromPreset(tpl.gm); G.master.limiter = true; G.master.vol = 0; G.backing.duck = tpl.duck || 0;
-    project.bus.reverb.type = tpl.reverb; project.bus.delay.note = tpl.delay; project.bus.delay.feedback = tpl.fb; project.bus.delay.pingpong = tpl.pp;
-    done.push('エフェクト');
+    if (!opt.keepFx) { project.bus.reverb.type = tpl.reverb; project.bus.delay.note = tpl.delay; project.bus.delay.feedback = tpl.fb; project.bus.delay.pingpong = tpl.pp; }
+    done.push(opt.keepFx ? 'エフェクトはそのまま' : 'エフェクト');
     for (let i = 0; i < project.tracks.length; i++) {
       const tr = project.tracks[i];
       if (!needsProcessing(tr)) continue;
       busy(`音声を処理中…（${i + 1}/${project.tracks.length}）`, 0.45 + 0.35 * i / project.tracks.length);
       await processTrack(tr, (p) => busy(`音声を処理中…（${i + 1}/${project.tracks.length}）`, 0.45 + 0.35 * (i + p) / project.tracks.length));
     }
+    if (tpl.ai) {
+      // noisy recording → stronger noise removal, then listen to the cleaned voice and decide the settings
+      for (const tr of project.tracks) {
+        if (opt.clean && isVox(tr) && tr.clean.on && tr.clean.auto && tr.cleanInfo && tr.cleanInfo.noiseDb > -52 && tr.cleanInfo.snr > 12 && !(tr.clean.autoLevel > 0)) {
+          tr.clean.autoLevel = 1; busy('環境音が多めなので、ノイズ除去を強めています…', 0.8); await processTrack(tr);
+          aiNotes.push('環境音が多めだったので、ノイズ除去を「強」にしました');
+        }
+      }
+      busy('AIが声と音源を解析中…', 0.85);
+      await new Promise((r) => setTimeout(r, 30));
+      const a = aiTune(opt); aiNotes = aiNotes.concat(a.notes); tpl = Object.assign({}, tpl, { lu: a.lu });
+      done.push('AI解析');
+    }
     await autoBalance(tpl.lu, true);
     G.balanceTpl = null;
     done.push('バランス');
+    project.exportFinal = tpl.gm === 'gm_video' ? 'video' : 'stream';
+    if (opt.ref) { busy('参考曲に寄せています…', 0.95); const m = await matchReference(opt.ref).catch(() => null); if (m) aiNotes.push(m); }
     project.lastAutoMix = key;
     freeWorkerMemory();
-    project.exportFinal = tpl.gm === 'gm_video' ? 'video' : 'stream';
     busy(false);
     saveProject(); refreshStudio();
-    infoModal(`「${tpl.name}」でMIXしました`, `<p>${done.join(' → ')}</p><p>▶ で聴いてみてください。気になるところは各トラックや「ボーカル類」「音源」「マスター」のトラックで調整できます。書き出しは「配信向け（-14 LUFS）」がおすすめです。</p>`);
+    infoModal(`「${tpl.name}」でMIXしました`, `<p>${done.join(' → ')}</p>${aiNotes.length ? '<p><b>AIの判断</b><br>・' + aiNotes.join('<br>・') + '</p>' : ''}<p>▶ で聴いてみてください。気になるところは各トラックや「ボーカル類」「音源」「マスター」のトラックで調整できます。</p>`);
   } catch (e) {
     busy(false);
     console.error(e);
