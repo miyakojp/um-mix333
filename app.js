@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
 import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT, flatFx, groupCfg } from './audio-engine.js';
-export const APP_VERSION = 'v19';
+export const APP_VERSION = 'v20';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -965,6 +965,11 @@ function drawClip(g, tr, buf, peaks, y) {
       g.save(); g.beginPath(); g.rect(bx, top, bw, hh); g.clip();
       g.fillText(clipFxLabel(c.fx), bx + 5, top + hh - 4); g.restore();
     }
+    if (c.takes && c.takes.length > 1 && w > 60) {
+      const lbl = `テイク ${c.take + 1}/${c.takes.length}`;
+      g.font = 'bold 10px -apple-system, sans-serif'; g.fillStyle = '#ffd37a';
+      g.fillText(lbl, Math.min(x0 + w, TL.w) - g.measureText(lbl).width - 6, top + 12);
+    }
     if (selClip) {
       g.fillStyle = '#f4c95d';
       roundRect(g, x0 - 5, top + hh / 2 - 14, 10, 28, 4); g.fill();
@@ -1100,7 +1105,8 @@ async function clipOp(op) {
   if (op === 'split') {
     const c = clipAtPlayhead(tr); if (!c) { toast('再生位置（黄色い線）をクリップの上に置いてください'); return; }
     const m = c.a + (T - c.at);
-    const n = Object.assign({}, c, { at: T, a: m, fx: c.fx ? clone(c.fx) : undefined }); c.b = m;
+    const n = Object.assign({}, c, { at: T, a: m, fx: c.fx ? clone(c.fx) : undefined, takes: undefined, take: undefined }); c.b = m;
+    if (c.takes) { delete c.takes; delete c.take; toast('分割したので、ほかのテイクは外れました（↶ で戻せます）', 2200); }
     tr.clips.push(n); afterClipEdit(tr, n); toast('分割しました（右側を選択中）', 1300);
   } else if (op === 'cutL' || op === 'cutR') {
     const c = sel; if (!c) return;
@@ -1111,7 +1117,7 @@ async function clipOp(op) {
     toast(op === 'cutL' ? '黄色い線より前をカットしました' : '黄色い線より後をカットしました', 1300);
   } else if (op === 'dup') {
     const c = sel; if (!c) return;
-    const n = Object.assign({}, c, { at: clipEndT(c), fx: c.fx ? clone(c.fx) : undefined });
+    const n = Object.assign({}, c, { at: clipEndT(c), fx: c.fx ? clone(c.fx) : undefined, takes: c.takes ? clone(c.takes) : undefined });
     tr.clips.push(n); afterClipEdit(tr, n); toast('複製しました（すぐ後ろに配置）', 1400);
   } else if (op === 'del') {
     const c = sel; if (!c) return;
@@ -1151,6 +1157,46 @@ async function joinClips(tr, list) {
   processTrack(tr);
   toast('結合しました（↶ で戻せます）', 1400);
 }
+// ---- テイク: several recordings of the same place; pick the best one ----
+const takeVals = (c) => ({ at: c.at, a: c.a, b: c.b, lo: c.lo, hi: c.hi });
+function switchTake(tr, c, i) {
+  if (!c.takes || !c.takes[i] || i === c.take) return;
+  c.takes[c.take] = takeVals(c);          // remember trims / moves made to the current one
+  Object.assign(c, c.takes[i]); c.take = i;
+  afterClipEdit(tr, c);
+}
+function takeSheet(tr, c) {
+  if (!isVox(tr)) { toast('テイクはボーカル・ハモリのトラックで使えます'); return; }
+  openModal((box, close) => {
+    const render = () => {
+      box.innerHTML = '';
+      const takes = c.takes || [takeVals(c)], cur = c.takes ? c.take : 0;
+      const list = h('div', { class: 'pick-list' });
+      takes.forEach((t, i) => {
+        const v = i === cur ? takeVals(c) : t;
+        list.append(h('button', { class: i === cur ? 'on' : '', onclick: () => { switchTake(tr, c, i); render(); } },
+          h('span', { style: 'flex:1' }, `テイク ${i + 1}` + (i === cur ? '（使用中）' : '')), h('small', { class: 'note' }, `${(v.b - v.a).toFixed(1)}秒`)));
+      });
+      box.append(h('h3', {}, '🎙 テイク（録り直しの聴き比べ）'),
+        h('p', { class: 'note', style: 'margin:0 0 8px' }, '同じ所をもう一度録ると、前の録音は消えずに「テイク」として残ります。タップで切り替えて、良い方を選べます。'),
+        list,
+        h('div', { class: 'actions' },
+          h('button', { class: 'big-btn primary', onclick: () => { close(); deselectClip(); engine.seek(c.at); recordInto(tr, c); } }, '● もう1回録る（新しいテイク）'),
+          h('button', { class: 'big-btn', onclick: () => { engine.ensure(); playFrom(Math.max(0, c.at - 1), null); } }, '▶ この部分を試聴'),
+          takes.length > 1 ? h('button', { class: 'big-btn ghost', onclick: () => {
+            histCommit();
+            c.takes.splice(cur, 1);
+            const ni = Math.min(cur, c.takes.length - 1);
+            Object.assign(c, c.takes[ni]); c.take = ni;
+            if (c.takes.length === 1) { delete c.takes; delete c.take; }
+            afterClipEdit(tr, c); render();
+          } }, '使用中のテイクを削除') : null,
+          h('button', { class: 'big-btn ghost', onclick: close }, '閉じる')));
+    };
+    render();
+  });
+}
+
 // ---- 部分エフェクト: effects only on one clip (split the clip first to choose the part) ----
 const CLIP_FX_PRESETS = [
   ['clear', 'なし', {}],
@@ -1165,6 +1211,10 @@ const CLIP_FX_PRESETS = [
   ['lofi', 'ローファイ', { voice: 'lofi', voiceMix: 1 }],
   ['muffle', 'こもり', { muffle: 0.75 }],
   ['whisper', 'ささやき', { vol: -4, reverb: 0.5 }],
+  ['swell', '逆再生リバーブ', { swell: 0.7 }],
+  ['octup', 'オクターブ上', { oct: 'up', octMix: 0.45 }],
+  ['octdown', 'オクターブ下', { oct: 'down', octMix: 0.5 }],
+  ['tape', 'テープストップ', { tape: 0.8 }],
 ];
 function clipFxLabel(fx) {
   if (!clipHasFx(fx)) return '';
@@ -1174,6 +1224,9 @@ function clipFxLabel(fx) {
   if (fx.reverb > 0) a.push(fx.tail ? '語尾リバーブ' : 'リバーブ');
   if (fx.muffle > 0) a.push('こもり');
   if (fx.vol) a.push(`音量${fx.vol > 0 ? '+' : ''}${fx.vol}dB`);
+  if (fx.swell > 0) a.unshift('逆再生リバーブ');
+  if (fx.oct && fx.oct !== 'none' && fx.octMix > 0) a.push(fx.oct === 'up' ? 'オクターブ上' : 'オクターブ下');
+  if (fx.tape > 0) a.push('テープストップ');
   return '✨ ' + a.join('・');
 }
 function clipFxSheet(tr, c) {
@@ -1196,6 +1249,15 @@ function clipFxSheet(tr, c) {
         chips([['none', 'なし'], ['phone', '電話'], ['radio', 'ラジオ'], ['megaphone', 'メガホン'], ['robot', 'ロボ'], ['lofi', 'ローファイ']], fx.voice, (v) => upd('voice', v, true)),
         fx.voice !== 'none' ? slider({ label: '加工の量', min: 0, max: 100, step: 1, value: Math.round(fx.voiceMix * 100), fmt: (v) => v + '%', oninput: (v) => upd('voiceMix', v / 100) }) : null,
         slider({ label: 'こもり', min: 0, max: 100, step: 1, value: Math.round(fx.muffle * 100), fmt: (v) => v + '%', oninput: (v) => upd('muffle', v / 100) }),
+        h('div', { class: 'lbl-line' }, '演出'),
+        slider({ label: '逆再生リバーブ', min: 0, max: 100, step: 5, value: Math.round((fx.swell || 0) * 100), fmt: (v) => v === 0 ? 'なし' : v + '%', oninput: (v) => upd('swell', v / 100) }),
+        h('p', { class: 'note', style: 'margin:-4px 0 6px' }, 'クリップの歌い出しの前に、吸い込むような「ふわ〜っ」が入ります（約1.3秒前から）。'),
+        h('div', { class: 'lbl-line' }, 'オクターブ重ね'),
+        chips([['none', 'なし'], ['up', '1オクターブ上'], ['down', '1オクターブ下']], fx.oct || 'none', (v) => upd('oct', v, true)),
+        (fx.oct || 'none') !== 'none' ? slider({ label: '重ねる量', min: 0, max: 100, step: 5, value: Math.round((fx.octMix || 0) * 100), fmt: (v) => v + '%', oninput: (v) => upd('octMix', v / 100) }) : null,
+        (fx.oct || 'none') !== 'none' ? h('p', { class: 'note', style: 'margin:-4px 0 6px' }, '重ねる声を作るのに数秒かかります。できあがると自動で鳴り始めます。') : null,
+        slider({ label: 'テープストップ', min: 0, max: 2, step: 0.1, value: fx.tape || 0, fmt: (v) => v === 0 ? 'なし' : '最後の' + v.toFixed(1) + '秒', oninput: (v) => upd('tape', v) }),
+        h('p', { class: 'note', style: 'margin:-4px 0 6px' }, 'クリップの最後で、音がギュイーンと遅くなって止まります。音源にもかけると曲全体が止まる演出になります（音源も同じ位置で分割して両方に）。'),
         slider({ label: '音量', min: -18, max: 6, step: 0.5, value: fx.vol, fmt: fmtDb, oninput: (v) => upd('vol', v) }),
         h('div', { class: 'actions' },
           h('button', { class: 'big-btn primary', onclick: () => { engine.ensure(); playFrom(Math.max(0, c.at - 1.5), null); } }, '▶ この部分を試聴'),
@@ -1352,7 +1414,7 @@ function playFrom(pos, filter) {
   bgStop();
   playbackSession();
   currentPlayFilter = filter || null;
-  const proj = filter ? Object.assign({}, project, { tracks: project.tracks.filter(filter) }) : project;
+  const proj = Object.assign({}, project, { tracks: filter ? project.tracks.filter(filter) : project.tracks, extras: extrasForPlayback });
   engine.play(proj, playBufferFor, pos);
   updateTransportUI();
 }
@@ -1383,8 +1445,24 @@ function updateTransportUI() {
   $('btnRec').classList.toggle('wait', !!rec.finishing);
   if (pitchEditor) pitchEditor.updatePlayButton(engine.playing);
 }
+let countShown = '';
+function updateCountIn() {
+  let txt = '';
+  if (rec.active && rec.punchT != null && engine.ctx) {
+    const left = rec.punchT - engine.ctx.currentTime;
+    if (left > 0.05) txt = String(Math.ceil(left));
+    else if (left > -0.8) txt = '●';
+  }
+  if (txt === countShown) return;
+  countShown = txt;
+  const el = $('countIn');
+  el.classList.toggle('hidden', !txt);
+  el.classList.toggle('go', txt === '●');
+  el.textContent = txt === '●' ? '録音中' : txt;
+}
 function loop() {
   requestAnimationFrame(loop);
+  updateCountIn();
   if (!project) return;
   if (engine.playing) {
     const pos = engine.position;
@@ -1463,7 +1541,9 @@ function latencySec() {
   const ctx = engine.ensure();
   return Math.max(0.005, (ctx.baseLatency || 0.005) + (ctx.outputLatency || 0.012) + 0.008);
 }
-function recordInto(tr) {
+let pendingTake = null; // the clip that the next recording becomes a new take of
+function recordInto(tr, takeClip) {
+  if (!rec.active) pendingTake = takeClip || null;
   selectedId = tr.id;
   settings.recTarget = 'auto'; saveSettings();
   renderLaneHeads(); refreshHead();
@@ -1543,7 +1623,10 @@ async function startRecordingInner(forceTarget, isRetry) {
   }
   const bf = (t) => (t.id.endsWith(':pre') ? bufferFor(target) : bufferFor(t));
   // light playback while recording: no effects, so the audio thread never drops samples
-  rec.playWhen = engine.play(playProj, bf, rec.startPos, { lead: 0.2, light: true });
+  // count-in: when there is not enough song before the yellow line (e.g. recording from 0:00), wait in silence instead
+  const lead = 0.2 + Math.max(0, (settings.preroll || 0) - (rec.punchPos - rec.startPos));
+  rec.playWhen = engine.play(playProj, bf, rec.startPos, { lead, light: true });
+  rec.punchT = rec.playWhen + (rec.punchPos - rec.startPos);
   updateTransportUI(); refreshStudio();
   if (!target) TL.scrollY = Math.max(0, (project.tracks.length + 1) * LANE_H - TL.h);
   if (project.memo && project.memo.trim() && $('lyricsPane').classList.contains('hidden')) { $('lyricsPane').classList.remove('hidden'); refreshHead(); }
@@ -1615,7 +1698,7 @@ async function stopRecordingInner() {
   try { rec.src.disconnect(); rec.node.disconnect(); rec.sink.disconnect(); if (rec.mon) rec.mon.disconnect(); } catch (e) { /* ignore */ }
   rec.stream.getTracks().forEach((t) => t.stop());
   rec.active = false;
-  const R0 = { target: rec.target, punch: rec.punch, punchPos: rec.punchPos, startPos: rec.startPos, playWhen: rec.playWhen, firstFrame: rec.firstFrame, kind: rec.kind };
+  const R0 = { takeOf: pendingTake, target: rec.target, punch: rec.punch, punchPos: rec.punchPos, startPos: rec.startPos, playWhen: rec.playWhen, firstFrame: rec.firstFrame, kind: rec.kind };
   updateTransportUI();
   const sr = ctx.sampleRate;
   let data = new Float32Array(rec.len);
@@ -1643,7 +1726,8 @@ async function stopRecordingInner() {
   histCommit();
   if (R0.punch && R0.target && project.tracks.includes(R0.target)) {
     project.lastRecId = R0.target.id;
-    if (R0.target.audioId) await punchIn(R0.target, data.slice(), sr, offset, R0.punchPos);
+    pendingTake = null;
+    if (R0.target.audioId) await punchIn(R0.target, data.slice(), sr, offset, R0.punchPos, R0.takeOf);
     else await recordIntoEmpty(R0.target, data, sr, offset, R0.punchPos);
     return;
   }
@@ -1772,7 +1856,7 @@ async function appendAudio(tr, pieces, onProgress) {
 
 // recording from the yellow line into a track that already has audio:
 // the old clips are cut at the start/end of the new take and the take becomes its own clip
-async function punchIn(tr, take, takeSr, takeStart, punchPos) {
+async function punchIn(tr, take, takeSr, takeStart, punchPos, takeOf) {
   busy('録音を保存中…');
   const old = buffers.get(tr.audioId);
   const sr = old.sampleRate;
@@ -1782,14 +1866,24 @@ async function punchIn(tr, take, takeSr, takeStart, punchPos) {
   const starts = await appendAudio(tr, [{ data }], (p) => busy('音程を解析中…', p));
   if (!starts) { busy(false); refreshStudio(); return; }
   const a0 = starts[0];
+  // recording again from the start of a clip → the old recording is kept as another "take" of that clip
+  const tc = takeOf && tr.clips.includes(takeOf) ? takeOf
+    : tr.clips.find((c) => Math.abs(c.at - punchPos) < 0.25 && clipEndT(c) > nStart + 0.3) || null;
   const out = [];
   for (const c of tr.clips) {
+    if (c === tc) continue;
     const s0 = c.at, e0 = clipEndT(c);
     if (e0 <= nStart + 1e-4 || s0 >= nEnd - 1e-4) { out.push(c); continue; }
-    if (s0 < nStart) out.push(Object.assign({}, c, { b: c.a + (nStart - s0) }));
-    if (e0 > nEnd) out.push(Object.assign({}, c, { at: nEnd, a: c.a + (nEnd - s0) }));
+    if (s0 < nStart) out.push(Object.assign({}, c, { b: c.a + (nStart - s0), takes: undefined, take: undefined }));
+    if (e0 > nEnd) out.push(Object.assign({}, c, { at: nEnd, a: c.a + (nEnd - s0), takes: undefined, take: undefined }));
   }
-  const nc = { at: nStart, a: a0, b: a0 + len, lo: a0, hi: a0 + len };
+  const nv = { at: nStart, a: a0, b: a0 + len, lo: a0, hi: a0 + len };
+  let nc = nv;
+  if (tc) {
+    if (!tc.takes) { tc.takes = [takeVals(tc)]; tc.take = 0; } else tc.takes[tc.take] = takeVals(tc);
+    tc.takes.push(nv); tc.take = tc.takes.length - 1;
+    nc = Object.assign(tc, nv);
+  }
   out.push(nc);
   tr.clips = out;
   fixClips(tr);
@@ -1798,7 +1892,7 @@ async function punchIn(tr, take, takeSr, takeStart, punchPos) {
   saveProject(); refreshStudio();
   processTrack(tr);
   const linked = project.tracks.some((t) => t.harmonyOf === tr.id);
-  toast(linked ? '録音しました。ハモリは作り直してください' : `${fmtTime(Math.max(nStart, 0))}から録音しました（別のクリップになっています・↶ で取り消し）`, 3000);
+  toast(tc ? `テイク${tc.takes.length}を録音しました。クリップをタップ →「テイク」で前の録音と聴き比べできます` : linked ? '録音しました。ハモリは作り直してください' : `${fmtTime(Math.max(nStart, 0))}から録音しました（別のクリップになっています・↶ で取り消し）`, 3500);
 }
 
 // put another track's audio into this track (as separate clips) and remove the other track
@@ -2168,6 +2262,99 @@ function buildBalanceTab(body) {
 // ---------------- mix rendering (書き出し・バランス・バックグラウンド再生) ----------------
 // The mix is calculated by our own code in the background worker, a few seconds at a time.
 // (The browser's built-in offline renderer can freeze or crash on iPhone.) The screen stays responsive.
+// ---------- extra sound layers made for clip effects (逆再生リバーブ / オクターブ重ね) ----------
+// They are calculated from the clip's audio, cached per audio buffer, and mixed into the track's input
+// both in playback and in the export renderer.
+const extraCache = new WeakMap();   // AudioBuffer -> Map(key -> {data: Float32Array, sr, buffer})
+const extraJobs = new Map();        // key -> Promise (octave layers are made in the worker)
+function monoPiece(buf, a, b) {
+  const sr = buf.sampleRate, i0 = Math.max(0, Math.round(a * sr)), i1 = Math.min(buf.length, Math.round(b * sr));
+  const x = new Float32Array(Math.max(0, i1 - i0)), c0 = buf.getChannelData(0), c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+  for (let i = 0; i < x.length; i++) x[i] = c1 ? 0.5 * (c0[i0 + i] + c1[i0 + i]) : c0[i0 + i];
+  return x;
+}
+// reverse reverb: the reverb of the first words, played backwards so it swells INTO the clip
+function makeSwell(buf, c) {
+  const sr = buf.sampleRate, x = monoPiece(buf, c.a, Math.min(c.b, c.a + 1.2));
+  const irN = Math.round(1.3 * sr), tailN = Math.round(0.12 * sr);
+  if (x.length < 0.1 * sr) return null;
+  let N = 1; while (N < x.length + irN) N <<= 1;
+  const fft = DSP.makeFFT(N);
+  const xr = new Float64Array(N), xi = new Float64Array(N), hr = new Float64Array(N), hi = new Float64Array(N);
+  xr.set(x);
+  let seed = 4242, lp = 0;
+  for (let n = 0; n < irN; n++) {
+    seed = (seed * 1664525 + 1013904223) >>> 0; lp = lp * 0.55 + (seed / 4294967296 * 2 - 1) * 0.45;
+    hr[irN - 1 - n] = lp * Math.exp(-6.2 * n / irN);   // reversed decay
+  }
+  fft(xr, xi); fft(hr, hi);
+  for (let k = 0; k < N; k++) { const a = xr[k] * hr[k] - xi[k] * hi[k], b = xr[k] * hi[k] + xi[k] * hr[k]; xr[k] = a; xi[k] = b; }
+  fft(xr, xi, true);
+  const L = irN - 1 + tailN, y = new Float32Array(L);
+  let pk = 0, px = 0;
+  for (let i = 0; i < L; i++) { const fin = Math.min(1, i / (0.35 * L)), fout = Math.min(1, (L - i) / tailN); y[i] = xr[i] * fin * fin * fout; if (Math.abs(y[i]) > pk) pk = Math.abs(y[i]); }
+  for (let i = 0; i < x.length; i++) if (Math.abs(x[i]) > px) px = Math.abs(x[i]);
+  if (pk < 1e-9) return null;
+  const g = 0.8 * px / pk; for (let i = 0; i < L; i++) y[i] *= g;
+  return { data: y, sr, lead: (irN - 1) / sr };
+}
+function extraEntry(buf, key, make) {
+  let m = extraCache.get(buf); if (!m) { m = new Map(); extraCache.set(buf, m); }
+  if (!m.has(key)) m.set(key, make());
+  return m.get(key);
+}
+function octaveLayer(buf, c, dir) {
+  let m = extraCache.get(buf); if (!m) { m = new Map(); extraCache.set(buf, m); }
+  const key = `o|${dir}|${c.a.toFixed(3)}|${c.b.toFixed(3)}`;
+  if (m.has(key)) return m.get(key);
+  if (!extraJobs.has(key)) {
+    const x = monoPiece(buf, c.a, c.b), sr = buf.sampleRate;
+    const job = rpc({ type: 'shiftRaw', x, sr, semis: dir === 'up' ? 12 : -12 }, null, [x.buffer]).then((r) => {
+      const y = r.y, e = Math.min(y.length >> 1, Math.round(0.008 * sr));
+      for (let i = 0; i < e; i++) { y[i] *= i / e; y[y.length - 1 - i] *= i / e; }
+      m.set(key, { data: y, sr, lead: 0 });
+    }).catch((e) => { console.warn(e); m.set(key, null); }).finally(() => {
+      extraJobs.delete(key);
+      if (engine.playing && !rec.active) playFrom(engine.position, currentPlayFilter); // layer is ready → let it sound
+    });
+    extraJobs.set(key, job);
+  }
+  return undefined; // not ready yet
+}
+// ready layers of a track: [{data, sr, at, gain, buffer()}]
+function clipExtras(tr, buf) {
+  if (!buf || tr.fxOff || !tr.clips) return [];
+  const out = [];
+  for (const c of tr.clips) {
+    const fx = c.fx; if (!fx) continue;
+    if (fx.swell > 0) {
+      const e = extraEntry(buf, `s|${c.a.toFixed(3)}|${Math.min(c.b - c.a, 1.2).toFixed(3)}`, () => makeSwell(buf, c));
+      if (e) out.push({ e, at: c.at - e.lead, gain: fx.swell });
+    }
+    if (fx.oct && fx.oct !== 'none' && fx.octMix > 0) {
+      const e = octaveLayer(buf, c, fx.oct);
+      if (e) out.push({ e, at: c.at, gain: fx.octMix * 0.8 });
+    }
+  }
+  // a layer that would start before 0:00 is trimmed
+  return out.map((x) => {
+    let data = x.e.data, at = x.at;
+    if (at < 0) { data = data.subarray(Math.min(data.length, Math.round(-at * x.e.sr))); at = 0; }
+    return { data, sr: x.e.sr, at, gain: x.gain, src: x.e, trimmed: data !== x.e.data };
+  }).filter((x) => x.data.length > 16);
+}
+function extrasForPlayback(tr) {
+  return clipExtras(tr, playBufferFor(tr)).map((x) => {
+    let buffer;
+    if (x.trimmed) buffer = toAudioBuffer({ sr: x.sr, channels: [x.data] });
+    else { if (!x.src.buffer) x.src.buffer = toAudioBuffer({ sr: x.sr, channels: [x.data] }); buffer = x.src.buffer; }
+    return { buffer, at: x.at, gain: x.gain };
+  });
+}
+async function ensureExtras() { // wait for the layers that are still being made (before an export)
+  for (const tr of project.tracks) clipExtras(tr, bufferFor(tr));
+  while (extraJobs.size) await Promise.all([...extraJobs.values()]);
+}
 function sourceSlice(tr, buf, T0, len, sr) {
   const nch = buf.numberOfChannels > 1 ? 2 : 1;
   const data = [buf.getChannelData(0), nch > 1 ? buf.getChannelData(1) : null];
@@ -2183,6 +2370,7 @@ function sourceSlice(tr, buf, T0, len, sr) {
     const cs = c.at, ce = c.at + (b - c.a);
     if (ce <= T0 || cs >= T1) continue;
     if (!out) { out = []; for (let k = 0; k < nch; k++) out.push(new Float32Array(len)); }
+    const tapeD = !tr.fxOff && c.fx && c.fx.tape > 0 ? Math.min(c.fx.tape, ce - cs) : 0;
     const i0 = Math.max(0, Math.ceil((cs - T0) * sr)), i1 = Math.min(len, Math.ceil((ce - T0) * sr));
     for (let k = 0; k < nch; k++) {
       const d = data[k], o = out[k], dl = d.length - 1;
@@ -2192,11 +2380,25 @@ function sourceSlice(tr, buf, T0, len, sr) {
         if (fi > 0) env = Math.min(env, (T - tS) / fi);
         if (fo > 0) env = Math.min(env, (tE - T) / fo);
         if (env <= 0) continue;
-        const p = (c.a + (T - cs)) * bsr, j = Math.floor(p);
+        let ps = c.a + (T - cs);
+        if (tapeD > 0.05 && T > ce - tapeD) { const tau = T - (ce - tapeD); ps = c.a + (ce - tapeD - cs) + tau - tau * tau / (2 * tapeD); } // tape stop
+        const p = ps * bsr, j = Math.floor(p);
         if (j < 0 || j >= dl) continue;
         const f = p - j;
         o[i] += (d[j] + (d[j + 1] - d[j]) * f) * env;
       }
+    }
+  }
+  for (const x of clipExtras(tr, buf)) {
+    const xs = x.at, xe = x.at + x.data.length / x.sr;
+    if (xe <= T0 || xs >= T1) continue;
+    if (!out) { out = []; for (let k = 0; k < nch; k++) out.push(new Float32Array(len)); }
+    const i0 = Math.max(0, Math.ceil((xs - T0) * sr)), i1 = Math.min(len, Math.floor((xe - T0) * sr)), d = x.data, dl = d.length - 1;
+    for (let i = i0; i < i1; i++) {
+      const p = (T0 + i / sr - xs) * x.sr, j = Math.floor(p);
+      if (j < 0 || j >= dl) continue;
+      const v = (d[j] + (d[j + 1] - d[j]) * (p - j)) * x.gain;
+      for (let k = 0; k < nch; k++) out[k][i] += v;
     }
   }
   return out;
@@ -2211,6 +2413,7 @@ function shiftPlan(plan, from) {
 // opts: {sr, from, maxSec, noTail, groups, end:{mode:'measure'|'file', target, ceil, bits}, onProgress}
 async function renderJS(include, opts) {
   const sr = opts.sr;
+  await ensureExtras();
   const tracks = project.tracks.filter((t) => include(t) && bufferFor(t));
   let end = 0;
   for (const t of tracks) { const b = bufferFor(t); for (const c of (t.clips && t.clips.length ? t.clips : [{ at: t.offset || 0, a: 0, b: b.duration }])) end = Math.max(end, c.at + (Math.min(c.b, b.duration) - c.a)); }
@@ -3388,6 +3591,7 @@ $('btnRedo').onclick = () => { if (!rec.active) redo(); };
 $('btnFollow').onclick = () => { settings.follow = settings.follow === false; saveSettings(); refreshHead(); toast(settings.follow ? '再生位置を自動で追いかけます' : '自動追尾をオフにしました', 1400); };
 $('ebDone').onclick = () => deselectClip();
 $('ebJoin').onclick = () => clipOp('join');
+$('ebTake').onclick = () => { const tr = selTrack(), c = selClipObj(); if (tr && c) takeSheet(tr, c); };
 $('ebFx').onclick = () => { const tr = selTrack(), c = selClipObj(); if (tr && c) clipFxSheet(tr, c); };
 $('ebSplit').onclick = () => clipOp('split');
 $('ebCutL').onclick = () => clipOp('cutL');

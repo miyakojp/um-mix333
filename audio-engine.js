@@ -562,8 +562,8 @@ export function curveAt(keys, t) {
   for (let i = 1; i < keys.length; i++) if (t <= keys[i][0]) { const [t0, v0] = keys[i - 1], [t1, v1] = keys[i]; return t1 > t0 ? v0 + (v1 - v0) * (t - t0) / (t1 - t0) : v1; }
   return keys[keys.length - 1][1];
 }
-export const CLIP_FX_DEFAULT = { echo: 0, reverb: 0, tail: false, voice: 'none', voiceMix: 0.8, vol: 0, muffle: 0 };
-export function clipHasFx(fx) { return !!fx && ((fx.echo || 0) > 0 || (fx.reverb || 0) > 0 || (fx.vol || 0) !== 0 || (fx.muffle || 0) > 0 || (fx.voice && fx.voice !== 'none' && (fx.voiceMix || 0) > 0)); }
+export const CLIP_FX_DEFAULT = { echo: 0, reverb: 0, tail: false, voice: 'none', voiceMix: 0.8, vol: 0, muffle: 0, swell: 0, oct: 'none', octMix: 0.5, tape: 0 };
+export function clipHasFx(fx) { return !!fx && ((fx.swell || 0) > 0 || (fx.tape || 0) > 0 || (fx.oct && fx.oct !== 'none' && (fx.octMix || 0) > 0) || (fx.echo || 0) > 0 || (fx.reverb || 0) > 0 || (fx.vol || 0) !== 0 || (fx.muffle || 0) > 0 || (fx.voice && fx.voice !== 'none' && (fx.voiceMix || 0) > 0)); }
 export function autoPlan(tr) {
   if (tr.fxOff) return null;
   const clips = (tr.clips || []).filter((c) => clipHasFx(c.fx));
@@ -634,8 +634,32 @@ function startSources(ctx, project, graph, bufferFor, when, from) {
         .filter((T) => T != null && T >= t0 && T <= ce).sort((x, y) => x - y);
       fg.gain.setValueAtTime(env(t0), ctxAt(t0));
       for (const T of pts) if (T > t0) fg.gain.linearRampToValueAtTime(env(T), ctxAt(T));
-      const off = c.a + (t0 - cs);
-      src.start(ctxAt(t0), off, b - off);
+      // テープストップ: the playback slows down to a stop over the last D seconds of the clip
+      const D = !tr.fxOff && c.fx && c.fx.tape > 0 ? Math.min(c.fx.tape, ce - cs) : 0;
+      if (D > 0.05) {
+        const ts = ce - D;
+        let off;
+        if (t0 < ts) { off = c.a + (t0 - cs); src.playbackRate.setValueAtTime(1, ctxAt(ts)); }
+        else { const tau = t0 - ts; off = c.a + (ts - cs) + tau - tau * tau / (2 * D); src.playbackRate.setValueAtTime(Math.max(0.001, 1 - tau / D), ctxAt(t0)); }
+        src.playbackRate.linearRampToValueAtTime(0.001, ctxAt(ce));
+        src.start(ctxAt(t0), Math.min(off, buf.duration - 0.001));
+        src.stop(ctxAt(ce));
+      } else {
+        const off = c.a + (t0 - cs);
+        src.start(ctxAt(t0), off, b - off);
+      }
+      sources.push(src);
+    }
+    // extra layers made for clip effects (reverse-reverb swell, octave layer): [{buffer, at, gain}]
+    const extras = project.extras ? project.extras(tr) : null;
+    if (extras) for (const x of extras) {
+      const xe = x.at + x.buffer.duration;
+      if (from >= xe) continue;
+      const src = ctx.createBufferSource(); src.buffer = x.buffer;
+      const g = ctx.createGain(); g.gain.value = x.gain == null ? 1 : x.gain;
+      src.connect(g); g.connect(ch.input);
+      const t0 = Math.max(from, x.at);
+      src.start(when + (t0 - from), t0 - x.at);
       sources.push(src);
     }
   }

@@ -338,3 +338,7 @@ pre.tree { background: var(--panel3); border-radius: 10px; padding: 10px 12px; f
 .link-btn { background: none; color: var(--mint); font-size: 12.5px; font-weight: 700; padding: 8px 0; text-align: left; }
 .num-in { width: 64px; flex: 1; min-width: 52px; height: 32px; border-radius: 8px; border: 1px solid #3a4150; background: #0f1216; color: var(--text); font-size: 16px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; -moz-appearance: textfield; }
 .num-in::-webkit-outer-spin-button, .num-in::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+/* v20: count-in before recording */
+.countin { position: absolute; left: 50%; top: 42%; transform: translate(-50%, -50%); z-index: 7; min-width: 110px; height: 110px; padding: 0 22px; border-radius: 55px; background: rgba(20,12,10,.82); border: 2px solid #ff7656; color: #fff; font-size: 64px; font-weight: 800; display: flex; align-items: center; justify-content: center; pointer-events: none; font-variant-numeric: tabular-nums; }
+.countin.go { font-size: 22px; height: 56px; background: #ff7656; color: #2a0f08; border-color: #ff7656; }
+.clipbar .cb-btns button { min-width: 38px; }

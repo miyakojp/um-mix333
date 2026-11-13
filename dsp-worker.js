@@ -149,6 +149,11 @@ self.onmessage = (ev) => {
         reply({ ok: true, blob, before, samples: L.length, sr });
         break;
       }
+      case 'shiftRaw': { // pitch-shift a piece of audio (octave layer for clip effects)
+        const y = DSP.pitchShiftPV(msg.x, msg.sr, msg.semis, prog);
+        reply({ ok: true, y }, [y.buffer]);
+        break;
+      }
       case 'dropAll': {
         store.clear();
         reply({ ok: true });

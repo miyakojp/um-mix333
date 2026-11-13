@@ -75,6 +75,7 @@
         <p>まずはカラオケ（伴奏）を読み込みましょう</p>
         <button class="big-btn primary small" id="btnAddFirst">＋ 音源を読み込む</button>
       </div>
+      <div class="countin hidden" id="countIn"></div>
       <div class="clipbar hidden" id="editBar">
         <div class="cb-info"><span id="ebInfo"></span><span class="cb-hint">ドラッグで移動・黄色い端でトリミング</span><button id="ebDone" aria-label="選択解除">✕</button></div>
         <div class="cb-btns">
@@ -82,6 +83,7 @@
           <button id="ebCutL"><i>⇤</i>前カット</button>
           <button id="ebCutR"><i>⇥</i>後カット</button>
           <button id="ebFx"><i>✨</i>FX</button>
+          <button id="ebTake"><i>🎙</i>テイク</button>
           <button id="ebJoin"><i>⊕</i>結合</button>
           <button id="ebDup"><i>⧉</i>複製</button>
           <button id="ebDel" class="del"><i>🗑</i>削除</button>
