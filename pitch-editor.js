@@ -370,7 +370,14 @@ export class PitchEditor {
 
   // ---------- editing ----------
   snapshot() { return JSON.stringify({ notes: this.tr.pitch.notes, cuts: this.tr.cuts }); }
-  pushUndo() { this.undoStack.push(this.snapshot()); this.redoStack = []; }
+  pushUndo() {
+    const sn = this.snapshot();
+    if (this.undoStack.length && this.undoStack[this.undoStack.length - 1] === sn) return; // nothing changed
+    this.undoStack.push(sn); this.redoStack = [];
+    // memory guard: forget the oldest steps only when the editor history itself gets very large
+    let n = 0; for (const x of this.undoStack) n += x.length;
+    while (n > 20e6 && this.undoStack.length > 20) n -= this.undoStack.shift().length;
+  }
   restore(s) { const o = JSON.parse(s); this.tr.pitch.notes = o.notes; this.tr.cuts = o.cuts; this.sel = new Set(); this.selCut = -1; this.committed(); }
   undo() { if (!this.undoStack.length) return; this.redoStack.push(this.snapshot()); this.restore(this.undoStack.pop()); }
   redo() { if (!this.redoStack.length) return; this.undoStack.push(this.snapshot()); this.restore(this.redoStack.pop()); }

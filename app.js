@@ -1,7 +1,7 @@
 // UtaMix — main application. All processing happens on this device.
 import { Store, uid } from './storage.js';
 import { Engine, PRESETS, PRESET_GROUPS, fxFromPreset, migrateFx, defaultBus, defaultGroups, REVERB_TYPES, DELAY_NOTES, COLOR_TYPES, encodeWav, EQ_LABELS, DEFAULT_PRESET, autoPlan, clipHasFx, CLIP_FX_DEFAULT, flatFx, groupCfg } from './audio-engine.js';
-export const APP_VERSION = 'v20';
+export const APP_VERSION = 'v21';
 import { PitchEditor } from './pitch-editor.js';
 
 const DSP = window.DSP;
@@ -240,7 +240,26 @@ function onProcState(fn) { procListeners.push(fn); return () => { procListeners 
 function emitProc(tr, state) { procListeners.forEach((f) => f(tr, state)); }
 const keyCache = new Map();
 
-async function processTrack(tr, onProgress) {
+// Only one render per track at a time. Edits made while it runs are collected and rendered once afterwards.
+// (Before, every edit queued another full render in the background; after many edits the phone ran out of memory.)
+const procRunning = new Map(); // track id -> Promise
+const procAgain = new Set();
+function processTrack(tr, onProgress) {
+  if (procRunning.has(tr.id)) {
+    procAgain.add(tr.id);
+    return procRunning.get(tr.id).then(() => (procRunning.has(tr.id) ? procRunning.get(tr.id) : null));
+  }
+  const run = (async () => {
+    try { await processTrackOnce(tr, onProgress); }
+    finally {
+      procRunning.delete(tr.id);
+      if (procAgain.has(tr.id)) { procAgain.delete(tr.id); if (project && project.tracks.includes(tr)) await processTrack(tr); }
+    }
+  })();
+  procRunning.set(tr.id, run);
+  return run;
+}
+async function processTrackOnce(tr, onProgress) {
   const token = (procTokens.get(tr.id) || 0) + 1;
   procTokens.set(tr.id, token);
   if (!needsProcessing(tr)) {
@@ -543,7 +562,11 @@ function toAudioBuffer(a) {
 }
 
 // ---------------- undo / redo ----------------
-const hist = { undo: [], redo: [], last: null, timer: null, applying: false };
+const hist = { undo: [], redo: [], last: null, timer: null, applying: false, size: 0 };
+// memory guard for the unlimited undo: when the history itself gets very large (about 60 MB),
+// the oldest steps are forgotten so the app does not crash. Normal use never reaches this.
+const HIST_BUDGET = 30e6; // characters
+function ownSize(parts, prev) { const ps = new Set(prev || []); let n = 0; for (const x of parts) if (!ps.has(x)) n += x.length; return n; }
 const procSig = new Map();
 const sigOf = (tr) => JSON.stringify([tr.audioId, tr.clean, tr.pitch, tr.cuts, tr.keyShift, tr.pitch.tuneOn ? project.key : 0]);
 const noInfo = (k, v) => (k === 'cleanInfo' ? undefined : v);
@@ -563,13 +586,17 @@ function updateHistBtns() {
   if (u) u.disabled = !hist.undo.length && !hist.timer;
   if (r) r.disabled = !hist.redo.length;
 }
-function histReset() { clearTimeout(hist.timer); hist.timer = null; hist.undo = []; hist.redo = []; hist.last = null; hist.last = project ? snapState() : null; updateHistBtns(); }
+function histReset() { clearTimeout(hist.timer); hist.timer = null; hist.undo = []; hist.redo = []; hist.size = 0; hist.last = null; hist.last = project ? snapState() : null; updateHistBtns(); }
 function histCommit() {
   clearTimeout(hist.timer); hist.timer = null;
   if (!project || hist.applying) return;
   const cur = snapState();
   if (!sameSnap(cur, hist.last)) {
-    if (hist.last) hist.undo.push(hist.last);
+    if (hist.last) {
+      hist.last.own = ownSize(hist.last, hist.undo.length ? hist.undo[hist.undo.length - 1] : null);
+      hist.undo.push(hist.last); hist.size += hist.last.own;
+      while (hist.size > HIST_BUDGET && hist.undo.length > 20) { const o = hist.undo.shift(); hist.size -= o.own || 0; }
+    }
     hist.redo = [];
     hist.last = cur;
   }
@@ -606,14 +633,15 @@ async function undo() {
   histCommit();
   if (!hist.undo.length) { toast('これ以上戻せません'); return; }
   hist.redo.push(hist.last);
-  hist.last = hist.undo.pop();
+  hist.last = hist.undo.pop(); hist.size -= hist.last.own || 0;
   await histApply(hist.last);
   toast('元に戻しました', 1200);
 }
 async function redo() {
   histCommit();
   if (!hist.redo.length) { toast('やり直せる操作がありません'); return; }
-  hist.undo.push(hist.last);
+  hist.last.own = ownSize(hist.last, hist.undo.length ? hist.undo[hist.undo.length - 1] : null);
+  hist.undo.push(hist.last); hist.size += hist.last.own;
   hist.last = hist.redo.pop();
   await histApply(hist.last);
   toast('やり直しました', 1200);
